@@ -111,3 +111,162 @@
 - [ ] KAMA loop is slow (~1.5 min/120 symbols) — optimize if full-universe
       runs are too slow (numba or reduced gate usage)
 - [ ] Note survivorship-bias caveat in every published result
+
+---
+
+# Phase D — Daily signals UI, trade tracker, and data scheduler
+
+**Goal:** a local web app that shows today's trade suggestions from the validated
+trailing engine, tracks every suggestion day by day (paper trading), and keeps
+the price data current — daily after close, and automatically catching up when
+the laptop is started after missed days.
+
+## Locked decisions
+
+- **Stack:** FastAPI + Jinja2 + HTMX + SQLite, served at `127.0.0.1:8000`,
+  local-only (no auth). Reuses the existing scanner/engine; server-rendered
+  pages; state in one SQLite file (`data/app.db`). No JS build step.
+- **Single source of truth for rules:** extract stop/exit logic from
+  `backtest/engine.py` into `src/sta/live/rules.py`; the engine and the live
+  tracker both import it. A parity test gates the tracker.
+- **Paper tracking only:** suggested entry price recorded; optional manual
+  override for the actual fill. No broker integration in v2.
+- **Scheduling:** Windows Task Scheduler (daily 18:30 IST) + "At logon"
+  catch-up task; plus an in-app startup sync as belt-and-braces. File lock
+  prevents concurrent runs.
+- **Data updates:** incremental fetch with an overlap check; any mismatch
+  (split/bonus retro-adjustment) triggers a full per-symbol refresh.
+
+## D1 — Data sync engine (foundation)
+
+- [ ] `src/sta/data/sync.py`: incremental update against a `sync_state` table.
+      How: read each universe symbol's last stored date; fetch the overlap
+      window (last 7 stored bars) + missing tail (`history(start=..., end=...)`);
+      concat + dedupe by date; compare overlapping closes — if any differ
+      >0.5%, do a full refresh (`period="max"`) for that symbol (Yahoo rewrites
+      history after splits/bonuses).
+- [ ] Batch path: `yf.download` in chunks of ~50 symbols (threaded) with
+      per-ticker fallback, so a 4,133-symbol daily refresh runs ~10–20 min.
+- [ ] Calendar guard: expected last trading day = max date across a sample of
+      20 symbols; symbols lagging >3 trading days are stale → retry once, then
+      log to `data/universe/sync_failures.csv`.
+- [ ] Data-quality gate: flag bars with |1-day move| >35% and no
+      split-factor change; flagged symbols never emit signals.
+- [ ] CLI `python -m sta sync [--full] [--workers N]`; writes a `sync_log` row
+      (counts, duration, status).
+- Acceptance: simulate a 3-day gap, run sync, all symbols reach the latest
+  trading day; re-running immediately changes nothing (idempotent).
+
+## D2 — Rules extraction + parity (gates D4)
+
+- [ ] `src/sta/live/rules.py`: pure functions — `initial_stop`,
+      `update_trailing_stop` (prior-day high-water + prior-day ATR, monotonic,
+      +5% floor after 10%, chandelier above 14%), `classify_stop`,
+      `exit_signal`, `atr_series(window).shift(1)`.
+- [ ] Refactor `backtest/engine.py` to import these; all existing tests green.
+- [ ] Parity test: replay the last 250 trading days via BacktestEngine and via
+      the live tracker on identical histories → identical trades (symbol,
+      entry/exit dates and prices, reason).
+- Acceptance: parity test passes exactly; a drift fails the build.
+
+## D3 — Database + signal snapshots
+
+- [ ] `src/sta/live/db.py` (stdlib sqlite3): tables
+      `signals(id, signal_date, symbol, score, close, cap_class, entry_plan,
+      stop_initial, created_at, UNIQUE(signal_date,symbol))`,
+      `trades(id, signal_id, symbol, status, entry_date, entry_price, shares,
+      stop_initial, stop_live, high_water, exit_date, exit_price,
+      exit_reason, pnl, created_at, updated_at)`,
+      `marks(trade_id, date, close, stop_live, high_water,
+      unrealized_pnl, PRIMARY KEY(trade_id,date))`,
+      `sync_log(...)`, `app_state(key,value)`.
+- [ ] `src/sta/live/signals.py`: run MomentumScanner on the latest trading day,
+      persist top-N with qty = floor(15000/price), stop_initial, risk ₹,
+      distance-to-52w-high, cap class.
+- [ ] `auto_track` setting: suggestions become `open` trades automatically at
+      the next session's open (paper); otherwise the user clicks "Track".
+- Acceptance: running the scan twice on the same date is idempotent.
+
+## D4 — Tracker engine
+
+- [ ] `src/sta/live/tracker.py` — `update_day(day)`:
+      1. entries: fill `suggested` trades at that day's open (paper);
+         expire unfilled suggestions after 1 trading day;
+      2. open trades: ratchet stop from prior-day data (rules module), test
+         exit against the day's bar, close with reason/price/costs
+         (`CostModel`), persist;
+      3. marks: write daily close, stop_live, high_water, unrealized P&L.
+- [ ] Enforce max 4 concurrent slots, ₹15k sizing, and the v2 fix:
+      no same-day re-entry into a symbol that exited that day.
+- [ ] Catch-up replay: process missed days in order so a 3-day laptop gap
+      produces the same state as daily runs.
+- Acceptance: tracker over 2020–2026 reproduces the backtest summary within
+  0.1%; order of replay (skipped days vs daily) produces identical results.
+
+## D5 — Web app
+
+- [ ] `src/sta/web/app.py` + Jinja templates + minimal CSS; `python -m sta.web`.
+- [ ] Pages:
+      `/` Today — data-freshness banner, signals table (score, close, qty for
+      ₹15k, stop, risk, distance to high), Track/Skip buttons, "Run scan now".
+      `/tracker` — open positions (current, unrealized %, stop_live,
+      high-water, days held, exit badge) + closed trades (filters: year,
+      reason, win/loss; CSV export).
+      `/performance` — equity curve, yearly P&L bars, win rate / PF /
+      expectancy, exit-reason breakdown (Chart.js vendored locally).
+      `/data` — sync status, last run, failures, stale symbols, "Sync now".
+      `/settings` — position size, slots, auto-track, schedule display.
+- [ ] Long jobs (sync, scan) run in a background thread; UI polls `/api/jobs`
+      for status. App startup kicks a catch-up sync if stale.
+- Acceptance: cold start shows current state; UI usable offline (localhost).
+
+## D6 — Scheduling (daily + laptop-start catch-up)
+
+- [ ] `scripts/run_daily.ps1`: `sta sync` → `sta scan --commit` → `sta track`,
+      logging to `data/logs/daily_YYYYMMDD.log`.
+- [ ] Register once (documented, not auto-run):
+      `schtasks /Create /SC DAILY /ST 18:30 /TN "STA Daily" /TR
+      "powershell -ExecutionPolicy Bypass -File <repo>\scripts\run_daily.ps1"`.
+- [ ] "At logon" task runs `sta sync --catch-up` (skips if the daily run
+      already covered today).
+- [ ] Locking: `data/.sync.lock` so app-start and scheduled runs never overlap;
+      atomic parquet writes (temp file + replace) so a killed sync cannot
+      corrupt history.
+- Acceptance: shut the laptop for 3 days → on startup data fills the gap and
+  the tracker replays the missed days; state matches continuous operation.
+
+## D7 — Hardening & ops
+
+- [ ] Nightly `data/app.db` backup to `data/backups/` (keep 14).
+- [ ] Alerts (log + desktop toast) when a sync fails >10% of symbols or an open
+      position cannot be marked for >5 trading days.
+- [ ] Rotating logs in `data/logs/`.
+- [ ] `config/settings.toml`: new `[live]` (position_size, max_positions,
+      auto_track, scan_top_n) and `[schedule]` (time, timezone) sections.
+- [ ] README: "Daily workflow" (open app → check data banner → review signals →
+  track fills) and how to enable/disable the scheduled tasks.
+
+## D8 — Tests
+
+- [ ] Unit: rules parity, stop monotonicity, profit floors, time-stop
+      suppression, same-day re-entry block.
+- [ ] Integration: SQLite CRUD, sync idempotency (mocked yfinance), tracker
+      replay on fixtures, API smoke tests via TestClient.
+- [ ] Golden: last 12 months backtest vs tracker → identical closed trades.
+
+## Dependencies to add
+
+`fastapi`, `uvicorn`, `jinja2`, `python-multipart` (forms). SQLite is stdlib;
+Chart.js vendored in `static/`. Scheduler uses Windows Task Scheduler (no
+APScheduler, to avoid duplicate schedulers).
+
+## Out of scope (v2.1+)
+
+Broker integration / order placement, multi-user/auth, cloud hosting, intraday
+signals, LLM/news layer, parameter re-optimization UI.
+
+## Sequencing and estimate
+
+D1 (1–2d) → D2 (0.5d) → D3 (0.5d) → D4 (1d) → D5 (2–3d) → D6 (0.5d) →
+D7 (0.5d), with D8 written alongside each step. D2's parity test gates D4;
+D1's idempotency test gates D6.
