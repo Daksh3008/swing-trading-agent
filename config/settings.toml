@@ -1,0 +1,14 @@
+# STA settings — single source of truth for behavior knobs.
+
+[download]
+period = "max"      # max historical data per ticker
+interval = "1d"
+workers = 8         # parallel yfinance fetchers
+sleep = 0.25        # politeness delay per fetch (seconds)
+force = false       # true = re-download even when cached
+
+[universe]
+tickers_file = "config/Equity.csv"  # BSE ticker list (reference project)
+max_mcap_cr = 50000.0               # keep stocks at or below this market cap
+small_upper_cr = 25000.0            # small-cap band: 5000-25000 cr
+micro_upper_cr = 5000.0             # micro-cap band: below 5000 cr
