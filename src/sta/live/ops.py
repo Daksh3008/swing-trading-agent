@@ -175,7 +175,7 @@ def rebase_book(settings: Settings, db: Database, *, position_size: float,
     with db.connect() as conn:
         conn.execute("DELETE FROM equity")
     db.set_state(CURSOR_KEY, "")
-    last = db.last_day()
+    last = db.trusted_day() or db.last_day()
     replayed = None
     if last:
         replayed = Tracker(settings, db).update_day(last).as_dict()

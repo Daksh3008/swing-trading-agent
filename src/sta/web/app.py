@@ -232,15 +232,29 @@ def _sync_then_track(settings: Settings, db: Database,
 def _catch_up_pipeline(settings: Settings, db: Database, progress=None) -> dict:
     """The daily sequence, used when the app starts on stale data."""
     from ..live.ops import check_sync_health
+    from ..live.signals import latest_session
 
     result = DataSync(settings, db, progress=progress).run()
     check_sync_health(settings, result)
     scanned = None
-    if result.updated or result.refreshed:
-        scanned = run_scan(settings, db, load_live_settings(settings, db),
-                           commit=True).as_dict()
+    scan_skipped = None
+    day = latest_session(settings, db)
+    latest_signal = db.latest_signal_day()
+    if day and (result.updated or result.refreshed) and (
+            not latest_signal or day.isoformat() > latest_signal):
+        coverage = db.get_json("sync.coverage", {}) or {}
+        if coverage.get("pct", 0) < 50:
+            scan_skipped = (f"{coverage.get('pct', 0)}% of the universe printed "
+                            f"{day}, below the 50% scan floor")
+        else:
+            try:
+                scanned = run_scan(settings, db, load_live_settings(settings, db),
+                                   commit=True).as_dict()
+            except ValueError as exc:      # incomplete feed, not an app failure
+                scan_skipped = str(exc)
     tracked = _track(settings, db)
-    return {"sync": result.as_dict(), "scan": scanned, "tracker": tracked}
+    return {"sync": result.as_dict(), "scan": scanned,
+            "scan_skipped": scan_skipped, "tracker": tracked}
 
 
 def _track(settings: Settings, db: Database) -> dict:
@@ -263,6 +277,10 @@ def _maybe_start_catch_up(settings: Settings, db: Database, jobs: JobManager,
     state = freshness(settings, db)
     if state["status"] == "fresh":
         return
+    if state["status"] == "source_lag":
+        log.info("startup: no session newer than %s upstream; not syncing",
+                 state["session"])
+        return
     log.info("startup: data is stale (%s), kicking a catch-up run", state["session"])
     jobs.start("sync", "Catching up after startup",
                lambda: _catch_up_pipeline(settings, db, jobs.report))
@@ -270,6 +288,8 @@ def _maybe_start_catch_up(settings: Settings, db: Database, jobs: JobManager,
 
 def serve(settings: Settings | None = None, host: str = "127.0.0.1",
           port: int = 8000) -> None:
+    import socket
+
     import uvicorn
 
     settings = settings or load_settings()
@@ -277,6 +297,16 @@ def serve(settings: Settings | None = None, host: str = "127.0.0.1",
 
     setup_file_logging(settings)
     logging.getLogger("sta").setLevel(logging.INFO)
+
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        if probe.connect_ex((host, port)) == 0:
+            logging.getLogger("sta").error(
+                "port %d on %s is already in use", port, host)
+            raise SystemExit(
+                f"port {port} on {host} is already in use - the app is running. "
+                f"Open http://{host}:{port}")
+
     logging.getLogger("sta").info("serving on http://%s:%d", host, port)
     uvicorn.run(create_app(settings), host=host, port=port, log_level="info")
 

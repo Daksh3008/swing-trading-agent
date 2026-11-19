@@ -127,3 +127,53 @@ def test_indian_number_and_percent_formatting():
     assert pct(0.1234) == "+12.3%"
     assert pct(-0.05) == "-5.0%"
     assert pct(0.62, 1, False) == "62.0%"
+
+
+# ------------------------------------------------- source lag and marks (E4/E6)
+
+def test_source_lag_is_explained_instead_of_stale(client):
+    db = client.app.state.db
+    db.set_json("sync.coverage", {"day": "2024-02-09", "at_session": 1,
+                                  "total": 1, "pct": 100})
+    log_id = db.start_sync_log()
+    db.finish_sync_log(log_id, finished_at=datetime.now().isoformat(timespec="seconds"),
+                       symbols=100, failed=0, status="ok")
+
+    page = client.get("/").text
+
+    assert "freshness--source_lag" in page
+    assert "upstream gap" in page
+    assert "Data is <strong>" not in page          # it is not called stale
+
+
+def test_latest_session_uses_coverage_not_the_newest_bar(client):
+    from sta.live.signals import latest_session
+
+    db = client.app.state.db
+    db.upsert_days(["2024-02-12"])                 # one symbol printed earlier
+    db.set_json("sync.coverage", {"day": "2024-02-09", "at_session": 1,
+                                  "total": 1, "pct": 100})
+
+    assert latest_session(client.app.state.settings, db) == date(2024, 2, 9)
+
+
+def test_stale_without_a_post_close_attempt(client):
+    db = client.app.state.db
+    db.set_json("sync.coverage", {"day": "2024-02-09", "at_session": 1,
+                                  "total": 1, "pct": 100})
+
+    page = client.get("/").text
+
+    assert "freshness--stale" in page
+    assert "freshness--source_lag" not in page
+
+
+def test_tracker_flags_a_mark_that_lags_the_session(client):
+    db = client.app.state.db
+    db.set_json("sync.coverage", {"day": "2024-02-12", "at_session": 1,
+                                  "total": 1, "pct": 100})
+
+    page = client.get("/tracker").text
+
+    assert "last close" in page
+    assert "no bar for the newest session" in page

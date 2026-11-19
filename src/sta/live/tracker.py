@@ -55,6 +55,7 @@ class DayOutcome:
     cash: float = 0.0
     nav: float = 0.0
     skipped: bool = False
+    reason: str | None = None
     exits_detail: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -63,7 +64,8 @@ class DayOutcome:
             "exits": self.exits, "expired": self.expired,
             "open_positions": self.open_positions,
             "cash": round(self.cash, 2), "nav": round(self.nav, 2),
-            "skipped": self.skipped, "exits_detail": self.exits_detail,
+            "skipped": self.skipped, "reason": self.reason,
+            "exits_detail": self.exits_detail,
         }
 
 
@@ -86,9 +88,15 @@ class Tracker:
 
     def update_day(self, day: Date | str) -> DayOutcome:
         day = _as_date(day)
+        trusted = self.db.trusted_day()
+        if trusted and day.isoformat() > trusted:
+            log.info("tracker %s: skipped, the cache is only covered through %s",
+                     day, trusted)
+            return DayOutcome(day=day, skipped=True,
+                              reason=f"cache covered through {trusted}")
         last = self.db.get_state(CURSOR_KEY)
         if last and day.isoformat() <= last:
-            return DayOutcome(day=day, skipped=True)
+            return DayOutcome(day=day, skipped=True, reason="already replayed")
 
         params = self.live.rules()
         prev = self.db.previous_day(day)
@@ -101,6 +109,11 @@ class Tracker:
         # 1. exits -------------------------------------------------------
         for row in self.db.open_trades():
             symbol = row["symbol"]
+            entry_date = str(row["entry_date"] or "")[:10]
+            if entry_date and entry_date >= day.isoformat():
+                # Filled today (only possible after a crash mid-replay). A
+                # position is never judged on its entry session.
+                continue
             days_held = int(row["days_held"] or 0)
             bar = self._bar(symbol, day)
             if bar is None:
@@ -152,7 +165,7 @@ class Tracker:
         fillable = []
         for row in self.db.suggested_trades():
             signal_date = row["signal_date"]
-            if prev is None or signal_date is None or signal_date < prev:
+            if signal_date is None or (prev is not None and signal_date < prev):
                 self.db.update_trade(row["id"], status="expired")
                 outcome.expired += 1
             elif signal_date == prev:
@@ -192,6 +205,10 @@ class Tracker:
             outcome.entries += 1
 
         # 3. marks + equity ----------------------------------------------
+        # A symbol with no bar is valued at its last recorded close, never at
+        # cost. Writing a mark for a session that did not print would hide the
+        # staleness, so the mark date stays honest and the UI flags it.
+        prior = self.db.latest_marks()
         positions_value = 0.0
         open_rows = self.db.open_trades()
         for row in open_rows:
@@ -199,7 +216,10 @@ class Tracker:
             shares = int(row["shares"] or 0)
             bar = self._bar(symbol, day)
             if bar is None:
-                positions_value += float(row["entry_price"] or 0.0) * shares
+                mark = prior.get(row["id"])
+                fallback = (float(mark["close"]) if mark and mark["close"] is not None
+                            else float(row["entry_price"] or 0.0))
+                positions_value += fallback * shares
                 continue
             close = float(bar["close"])
             positions_value += close * shares
@@ -228,8 +248,13 @@ class Tracker:
         return outcome
 
     def catch_up(self, until: Date | str | None = None) -> list[DayOutcome]:
-        """Replay every unprocessed session in order."""
+        """Replay every unprocessed session the cache can actually support."""
+        self.reconcile()
         until = _as_date(until) if until is not None else None
+        trusted = self.db.trusted_day()
+        if trusted:
+            cap = _as_date(trusted)
+            until = cap if until is None or until > cap else until
         cursor = self.db.get_state(CURSOR_KEY)
         start = cursor or self.db.first_signal_day()
         if start is None and until is None:
@@ -243,11 +268,85 @@ class Tracker:
         return out
 
     def pending_days(self, until: Date | str | None = None) -> list[str]:
+        self.reconcile()
+        until = _as_date(until) if until is not None else None
+        trusted = self.db.trusted_day()
+        if trusted:
+            cap = _as_date(trusted)
+            until = cap if until is None or until > cap else until
         cursor = self.db.get_state(CURSOR_KEY)
         start = cursor or self.db.first_signal_day()
         if start is None:
             return []
-        return self.db.trading_days(start=start, end=_as_date(until))
+        return [d for d in self.db.trading_days(start=start, end=until)
+                if not cursor or d > cursor]
+
+    def reconcile(self) -> dict:
+        """Undo a cursor or an entry advanced past the session the cache supports.
+
+        The old tracker processed a session that almost no symbol traded, marked
+        positions at cost and moved the cursor, so the real session could never
+        be replayed. This rolls that back: entries after the trusted session are
+        returned to the queue and their cash refunded, equity and marks after it
+        are dropped, ``days_held`` is recomputed from the calendar, and the
+        cursor returns to the trusted session.
+        """
+        trusted = self.db.trusted_day()
+        if not trusted:
+            return {"changed": False, "cursor": None, "trusted": None}
+        rolled = self._rollback_entries_after(trusted)
+        cursor = self.db.get_state(CURSOR_KEY)
+        changed = rolled > 0
+        equity_rows = mark_rows = 0
+        repaired = 0
+        if cursor and cursor > trusted:
+            with self.db.connect() as conn:
+                equity_rows = conn.execute(
+                    "DELETE FROM equity WHERE day > ?", (trusted,)).rowcount
+                mark_rows = conn.execute(
+                    "DELETE FROM marks WHERE date > ?", (trusted,)).rowcount
+            sessions = self.db.trading_days(end=trusted)
+            for row in self.db.open_trades():
+                entry = str(row["entry_date"] or "")[:10]
+                if not entry:
+                    continue
+                held = sum(1 for day in sessions if day > entry)
+                if held != int(row["days_held"] or 0):
+                    self.db.update_trade(row["id"], days_held=held)
+                    repaired += 1
+            self.db.set_state(CURSOR_KEY, trusted)
+            changed = True
+        if not changed:
+            return {"changed": False, "cursor": cursor, "trusted": trusted}
+        log.warning("tracker reconciled: cursor %s -> %s, rolled back %d entry/entries, "
+                    "dropped %d equity and %d mark rows, fixed %d day counters",
+                    cursor, trusted, rolled, equity_rows, mark_rows, repaired)
+        return {"changed": True, "cursor": trusted, "trusted": trusted,
+                "entries_rolled_back": rolled, "equity_rows": equity_rows,
+                "mark_rows": mark_rows, "days_fixed": repaired}
+
+    def _rollback_entries_after(self, trusted: str) -> int:
+        """Return positions opened after the trusted session to the queue."""
+        rolled = 0
+        cash = float(self.db.get_state(
+            CASH_KEY, self.live.position_size * self.live.max_positions))
+        for row in self.db.open_trades():
+            entry = str(row["entry_date"] or "")[:10]
+            if not entry or entry <= trusted:
+                continue
+            shares = int(row["shares"] or 0)
+            cash += (float(row["entry_price"] or 0.0) * shares
+                     + float(row["entry_cost"] or 0.0))
+            self.db.update_trade(
+                row["id"], status="suggested", entry_date=None, entry_price=None,
+                shares=None, stop_initial=None, stop_live=None, target=None,
+                high_water=None, entry_cost=0.0, days_held=0, pnl=None)
+            rolled += 1
+        if rolled:
+            self.db.set_state(CASH_KEY, cash)
+            log.warning("tracker: rolled back %d position(s) entered after %s",
+                        rolled, trusted)
+        return rolled
 
     # -------------------------------------------------------------- internals
 

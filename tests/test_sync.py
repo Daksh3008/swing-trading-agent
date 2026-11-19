@@ -112,6 +112,26 @@ def test_overlap_mismatch_triggers_full_refresh(tmp_path):
     assert hist["Close"].iloc[0] == pytest.approx(50.0)
 
 
+def test_stub_refresh_never_destroys_stored_history(tmp_path):
+    settings = _settings(tmp_path)
+    _seed(settings, "AAA.BO", DATES, [100.0 + i for i in range(len(DATES))])
+    path = settings.daily_dir / "AAA.BO.parquet"
+    before = path.read_bytes()
+    rewritten = [50.0 + i for i in range(len(DATES))]
+
+    class StubFeed(FakeFeed):
+        def single(self, symbol, start, end):
+            return _frame(DATES, rewritten)          # overlap mismatch
+        def max(self, symbol):
+            return _frame(DATES[:5], [50.0] * 5)     # a 5-row stub
+
+    result = _sync(settings, StubFeed({})).run()
+
+    assert result.refreshed == 0
+    assert result.unchanged >= 1
+    assert path.read_bytes() == before
+
+
 def test_fetch_failure_is_isolated(tmp_path):
     settings = _settings(tmp_path)
     for sym in ("AAA.BO", "BBB.BO"):
@@ -180,14 +200,15 @@ def test_quality_gate_flags_unexplained_crash():
     assert quality_flags(df2).sum() == 0
 
 
-def test_expected_last_day_ignores_a_lone_outlier():
+def test_expected_last_day_ignores_a_minority_outlier():
     from datetime import date
     days = [date(2024, 3, 7)] * 18 + [date(2024, 3, 8)] * 2
     assert expected_last_day(days) == date(2024, 3, 7)
-    days[0] = date(2024, 3, 8)
-    days[1] = date(2024, 3, 8)
-    days[2] = date(2024, 3, 8)
+    # a real majority moves the session
+    days = [date(2024, 3, 7)] * 10 + [date(2024, 3, 8)] * 10
     assert expected_last_day(days) == date(2024, 3, 8)
+    # no majority at all is not a session the cache can support
+    assert expected_last_day([date(2024, 3, 7)] * 4 + [date(2024, 3, 8)] * 3) is None
 
 
 def test_lock_blocks_concurrent_runs(tmp_path):
@@ -199,3 +220,70 @@ def test_lock_blocks_concurrent_runs(tmp_path):
     # released afterwards
     with sync_lock(settings.data_dir):
         pass
+
+
+# ------------------------------------------------------ source lag (E4)
+
+def _log(db, finished_at: str, status: str = "ok", symbols: int = 100,
+         failed: int = 0):
+    log_id = db.start_sync_log()
+    db.finish_sync_log(log_id, finished_at=finished_at, symbols=symbols,
+                       failed=failed, status=status)
+
+
+def test_attempted_since_requires_a_run_after_the_publish_window():
+    from datetime import date
+
+    from sta.data.sync import attempted_since
+    from sta.live.db import Database
+
+    db = Database(":memory:").init()
+    assert attempted_since(db, date(2026, 11, 18)) is False
+
+    # 16:05 is after the close but before the 18:30 publish window: not enough
+    _log(db, "2026-11-18T16:05:00", symbols=100)
+    assert attempted_since(db, date(2026, 11, 18)) is False
+
+    _log(db, "2026-11-18T18:30:00", symbols=100)
+    assert attempted_since(db, date(2026, 11, 18)) is True
+
+
+def test_attempted_since_ignores_failed_tiny_or_broken_runs():
+    from datetime import date
+
+    from sta.data.sync import attempted_since
+    from sta.live.db import Database
+
+    for status, symbols, failed in [("failed", 100, 0), ("interrupted", 100, 0),
+                                    ("ok", 10, 0), ("partial", 100, 80)]:
+        db = Database(":memory:").init()
+        _log(db, "2026-11-19T09:00:00", status=status, symbols=symbols, failed=failed)
+        assert attempted_since(db, date(2026, 11, 18)) is False, (status, symbols, failed)
+
+
+def test_catch_up_skips_after_a_verified_source_lag(tmp_path):
+    from datetime import datetime, timedelta
+
+    from sta.data.sync import expected_session
+    from sta.live.db import Database
+
+    settings = _settings(tmp_path)
+    db = Database(":memory:").init()
+    db.set_state("sync.last_day",
+                 (expected_session() - timedelta(days=1)).isoformat())
+    _log(db, datetime.now().isoformat(timespec="seconds"), status="partial")
+
+    result = DataSync(settings, db).run(catch_up=True)
+
+    assert result.status == "skipped"
+
+
+def test_catch_up_skips_when_the_cache_already_has_the_session(tmp_path):
+    from sta.data.sync import expected_session
+    from sta.live.db import Database
+
+    settings = _settings(tmp_path)
+    db = Database(":memory:").init()
+    db.set_state("sync.last_day", expected_session().isoformat())
+
+    assert DataSync(settings, db).run(catch_up=True).status == "skipped"

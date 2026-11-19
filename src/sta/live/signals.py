@@ -53,11 +53,16 @@ class ScanOutcome:
 
 
 def latest_session(settings: Settings, db: Database | None = None) -> Date | None:
-    """Newest trading day the cache knows about."""
+    """Newest session the cache can support.
+
+    This is the coverage-aware session, not the newest file date: one symbol
+    printing a day early must not move the scanner onto a session the rest of
+    the universe has not traded.
+    """
     if db is not None:
-        day = db.last_day()
-        if day:
-            return datetime.strptime(day, "%Y-%m-%d").date()
+        trusted = db.trusted_day()
+        if trusted:
+            return datetime.strptime(trusted, "%Y-%m-%d").date()
     files = sorted(settings.daily_dir.glob("*.parquet"))
     if not files:
         return None
@@ -171,8 +176,10 @@ def run_scan(settings: Settings, db: Database, live: LiveSettings | None = None,
         return outcome
 
     # Give the tracker a trading calendar even before a full sync has run.
+    # Never seed a bar later than the scanned session: one early print must not
+    # move the calendar (or the "actionable" check) past the coverage day.
     reference = max(histories.values(), key=len)
-    db.upsert_days(d.date() for d in reference.index[-500:])
+    db.upsert_days(d.date() for d in reference.index[-500:] if d.date() <= day)
 
     auto_track = live.auto_track
     for row in rows:

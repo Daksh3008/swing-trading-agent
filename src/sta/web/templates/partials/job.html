@@ -31,7 +31,9 @@
       {% if r.get("tracked") %} and {{ r["tracked"] }} queued{% endif %}.{% endif %}
       {% if r.get("sync") %}{{ r["sync"].get("updated", 0) }} updated, {{ r["sync"].get("failed", 0) }} failed.{% endif %}
       {% if r.get("scan") %}{{ r["scan"].get("stored", 0) }} new suggestion{{ "" if r["scan"].get("stored") == 1 else "s" }}.{% endif %}
+      {% if r.get("scan_skipped") %} Scan skipped: {{ r["scan_skipped"] }}.{% endif %}
       {% if r.get("days") is not none %}{{ r["days"] }} session{{ "" if r.get("days") == 1 else "s" }} replayed.{% endif %}
+      {% if r.get("tracker") and r["tracker"].get("days") is not none %}{{ r["tracker"]["days"] }} session{{ "" if r["tracker"]["days"] == 1 else "s" }} replayed.{% endif %}
     </span>
   {% endif %}
 </div>

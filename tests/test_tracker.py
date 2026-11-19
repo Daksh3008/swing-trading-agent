@@ -178,3 +178,135 @@ def test_no_alert_when_replaying_an_older_session(tmp_path, monkeypatch):
     tracker.update_day(date(2024, 3, 3))       # exit, but day 4 is the latest
     assert db.closed_trades()
     assert alerts == []
+
+
+# ------------------------------------------ trusted session + marking (E6)
+
+def _coverage(db, day):
+    db.set_json("sync.coverage", {"day": day.isoformat(), "at_session": 1,
+                                  "total": 1, "pct": 100})
+
+
+def test_cursor_does_not_advance_past_the_trusted_session(rig):
+    db, tracker, _ = rig
+    _coverage(db, DAYS[1])
+    _queue(db, "AAA.BO", 0.9)
+
+    first = tracker.update_day(DAYS[1])
+    assert not first.skipped
+    assert db.get_state("tracker.last_day") == DAYS[1].isoformat()
+
+    blocked = tracker.update_day(DAYS[2])
+    assert blocked.skipped
+    assert blocked.reason and "covered through" in blocked.reason
+    assert db.get_state("tracker.last_day") == DAYS[1].isoformat()
+    assert db.equity_on(DAYS[2]) is None
+
+
+def test_catch_up_stops_at_the_trusted_session(rig):
+    db, tracker, _ = rig
+    _coverage(db, DAYS[1])
+    _queue(db, "AAA.BO", 0.9)
+
+    outcomes = tracker.catch_up()
+
+    assert outcomes[-1].day == DAYS[1]
+    assert all(o.day <= DAYS[1] for o in outcomes)
+    assert db.get_state("tracker.last_day") == DAYS[1].isoformat()
+
+
+def test_position_without_a_bar_is_valued_at_its_last_close(tmp_path):
+    settings = Settings(root=tmp_path, universe=UniverseConfig(),
+                        download=DownloadConfig())
+    db = Database(":memory:").init()
+    db.upsert_days(DAYS)
+    live = LiveSettings(position_size=15_000, max_positions=4, auto_track=False,
+                        scan_top_n=10, stop_pct=0.10, target_pct=0.30,
+                        trailing_atr_mult=3.0, atr_window=22)
+    idx = pd.DatetimeIndex([pd.Timestamp(DAYS[0]), pd.Timestamp(DAYS[1]),
+                            pd.Timestamp(DAYS[2])])          # no DAYS[3] bar
+    prices = np.array([100.0, 100.0, 110.0])
+    bars = {"AAA.BO": pd.DataFrame({
+        "open": prices, "high": prices * 1.01, "low": prices * 0.99,
+        "close": prices, "volume": 1000, "value": prices * 1000,
+        "adj_close": prices, "prev_close": prices,
+        "exchange": "BSE", "isin": "", "name": "AAA",
+    }, index=idx)}
+    tracker = Tracker(settings, db, live=live, costs=FREE, histories=bars)
+    _queue(db, "AAA.BO", 0.9, day=DAYS[0])
+
+    tracker.update_day(DAYS[1])          # fills at 100, marks 100
+    tracker.update_day(DAYS[2])          # marks 110
+    outcome = tracker.update_day(DAYS[3])   # no bar: must still value at 110
+
+    trade = db.open_trades()[0]
+    assert trade["shares"] == 150
+    assert outcome.nav == pytest.approx(60_000 - 15_000 + 110.0 * 150)
+    assert db.equity_on(DAYS[3])["positions_value"] == pytest.approx(110.0 * 150)
+    marks = db.marks_for(trade["id"])
+    assert marks[-1]["date"] == DAYS[2].isoformat()   # no fake mark row
+
+
+def test_reconcile_rolls_back_a_phantom_session(tmp_path):
+    db, tracker, _ = _falling_rig(tmp_path, [100, 100, 100, 100])
+    _coverage(db, DAYS[1])
+    tracker.update_day(DAYS[1])              # fills at 100
+
+    trade = db.open_trades()[0]
+    db.update_trade(trade["id"], days_held=2)       # the old bug aged it
+    db.set_state("tracker.last_day", DAYS[3].isoformat())
+    db.upsert_equity(DAYS[3], 0.0, 0.0, 123.0, 1)
+
+    result = tracker.reconcile()
+
+    assert result["changed"] is True
+    assert result["cursor"] == DAYS[1].isoformat()
+    assert db.equity_on(DAYS[3]) is None
+    assert db.open_trades()[0]["days_held"] == 0
+    assert db.get_state("tracker.last_day") == DAYS[1].isoformat()
+
+
+def test_reconcile_is_a_noop_when_the_cursor_is_safe(rig):
+    db, tracker, _ = rig
+    _coverage(db, DAYS[2])
+    db.set_state("tracker.last_day", DAYS[2].isoformat())
+
+    assert tracker.reconcile()["changed"] is False
+    assert db.get_state("tracker.last_day") == DAYS[2].isoformat()
+
+
+def test_position_is_never_judged_on_its_entry_session(tmp_path):
+    db, tracker, _ = _falling_rig(tmp_path, [100, 100, 80, 80])
+    _coverage(db, DAYS[2])
+    db.set_state("tracker.last_day", DAYS[1].isoformat())
+    signal_id = _queue(db, "AAA.BO", 0.9, day=DAYS[1])
+    trade_id = db.trade_for_signal(signal_id)["id"]
+    # simulate an interrupted replay: the entry landed, the cursor did not move
+    db.update_trade(trade_id, status="open", entry_date=DAYS[2], entry_price=100.0,
+                    shares=150, stop_initial=90.0, stop_live=90.0, target=130.0,
+                    high_water=100.0, entry_cost=0.0, days_held=0, pnl=0.0)
+
+    tracker.update_day(DAYS[2])          # opens at 80, below the stop
+
+    assert db.open_trades(), "a same-day position must not be exited"
+    assert not db.closed_trades()
+
+
+def test_reconcile_rolls_back_an_entry_after_the_trusted_session(tmp_path):
+    db, tracker, _ = _falling_rig(tmp_path, [100, 100, 100, 100])
+    _coverage(db, DAYS[1])
+    signal_id = _queue(db, "AAA.BO", 0.9, day=DAYS[1])
+    trade_id = db.trade_for_signal(signal_id)["id"]
+    db.update_trade(trade_id, status="open", entry_date=DAYS[2], entry_price=100.0,
+                    shares=150, stop_initial=90.0, stop_live=90.0, target=130.0,
+                    high_water=100.0, entry_cost=1.0, days_held=0, pnl=0.0)
+    db.set_state("cash", 44_999.0)           # 60,000 - 15,000 - 1 cost
+
+    result = tracker.reconcile()
+
+    assert result["changed"] is True
+    assert result["entries_rolled_back"] == 1
+    trade = db.trade(trade_id)
+    assert trade["status"] == "suggested"
+    assert trade["entry_price"] is None
+    assert float(db.get_state("cash")) == pytest.approx(60_000.0)

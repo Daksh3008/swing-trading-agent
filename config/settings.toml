@@ -6,6 +6,7 @@ interval = "1d"
 workers = 8         # parallel yfinance fetchers
 sleep = 0.25        # politeness delay per fetch (seconds)
 force = false       # true = re-download even when cached
+gap_fill = true     # repair a BSE session missing from Yahoo using the NSE listing
 
 [universe]
 tickers_file = "config/Equity.csv"  # BSE ticker list (reference project)

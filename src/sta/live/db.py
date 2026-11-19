@@ -394,6 +394,47 @@ class Database:
             row = conn.execute("SELECT MAX(day) AS d FROM days").fetchone()
         return row["d"] if row else None
 
+    def universe_day(self) -> str | None:
+        """Newest bar any symbol reached, from the sync state (not the calendar)."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT MAX(last_date) AS d FROM sync_state").fetchone()
+        return row["d"] if row else None
+
+    def symbols_at(self, day: Date | str) -> int:
+        """How many symbols have a stored bar on or after ``day``."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM sync_state WHERE last_date >= ?",
+                (_iso(day),)).fetchone()
+        return int(row["n"]) if row else 0
+
+    def trusted_day(self) -> str | None:
+        """Newest session the cache can actually support.
+
+        The coverage record wins: one symbol printing a day early must not move
+        the tracker or the scanner onto a session the rest of the universe has
+        not traded yet. Falls back to the newest synced bar, then the stored
+        calendar.
+        """
+        coverage = self.get_json("sync.coverage", {}) or {}
+        if coverage.get("day") and int(coverage.get("pct", 0)) >= 50:
+            return str(coverage["day"])[:10]
+        # No usable coverage record: derive the newest day at least half the
+        # synced symbols reached. A lone early print must not qualify.
+        with self.connect() as conn:
+            total = conn.execute("SELECT COUNT(*) AS n FROM sync_state").fetchone()["n"]
+            if total:
+                row = conn.execute(
+                    """SELECT last_date, COUNT(*) AS n FROM sync_state
+                       WHERE last_date IS NOT NULL
+                       GROUP BY last_date
+                       HAVING n >= ?
+                       ORDER BY last_date DESC LIMIT 1""",
+                    (max(1, total / 2.0),)).fetchone()
+                if row and row["last_date"]:
+                    return row["last_date"]
+        return self.last_day()
+
     # ------------------------------------------------------------ sync state
 
     def set_sync_state(self, symbol: str, last_date: Date | str | None,

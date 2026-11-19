@@ -17,6 +17,7 @@ suggestions are behind with it.{% endblock %}
 
   <dl class="facts">
     <div><dt>Last bar</dt><dd>{{ freshness.session_label }}</dd></div>
+    <div><dt>Newest symbol bar</dt><dd>{{ universe_day | day if universe_day else "—" }}</dd></div>
     <div><dt>Expected</dt><dd>{{ freshness.expected_label }}</dd></div>
     <div><dt>Trading days</dt><dd>{{ trading_days }}</dd></div>
     <div><dt>Symbols cached</dt><dd>{{ freshness.symbols }}</dd></div>
@@ -49,6 +50,12 @@ suggestions are behind with it.{% endblock %}
       </span>
       <p class="hint">A symbol counts when its newest stored bar is the latest closed
         session. The rest are stale, suspended, or waiting on Yahoo.</p>
+      {% if freshness.status == "source_lag" %}
+      <p class="hint hint--warn">{{ freshness.expected_label }} is missing upstream for
+        most of the universe. {% if universe_day and universe_day > coverage.day %}
+        The newest single bar is {{ universe_day | day }}.{% endif %}
+        The next sync runs on its own after the following session closes.</p>
+      {% endif %}
     </div>
   {% else %}
     <div class="empty">
@@ -62,8 +69,8 @@ suggestions are behind with it.{% endblock %}
     <h2 class="h2-sub">Scheduled runs</h2>
   </div>
   <p class="note">Daily at {{ schedule.time }} {{ schedule.timezone }}, plus a catch-up
-    task at logon. Enable them once with the command in the README; the app also
-    checks for stale data on startup.</p>
+    task at logon and an app task at logon. Enable them once with the command in
+    the README; the app also checks for stale data on startup.</p>
 
   {% if lock %}
   <div class="flash">

@@ -1,10 +1,10 @@
-# STA daily run — sync, scan, track, back up.
+# STA daily run - sync, scan, track, back up.
 # Registered once with Windows Task Scheduler (see README). Never auto-registered.
 #
 #   schtasks /Create /SC DAILY /ST 18:30 /TN "STA Daily" /TR ^
 #     "powershell -ExecutionPolicy Bypass -File <repo>\scripts\run_daily.ps1"
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
@@ -18,20 +18,27 @@ function Write-Step([string]$text) {
     "[$(Get-Date -Format 'HH:mm:ss')] $text" | Out-File -FilePath $log -Append -Encoding utf8
 }
 
+function Invoke-Step([string]$name, [string[]]$arguments) {
+    Write-Step $name
+    & python @arguments 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        Write-Step "$name failed (exit $code)"
+        $script:failed = $true
+    }
+}
+
+$failed = $false
 Write-Step "daily run started"
 
-Write-Step "sync"
-& python -m sta sync --catch-up *>> $log
-$syncExit = $LASTEXITCODE
+Invoke-Step "sync" @("-m", "sta", "sync", "--catch-up")
+Invoke-Step "scan" @("-m", "sta", "scan", "--commit")
+Invoke-Step "track" @("-m", "sta", "track", "--catch-up")
+Invoke-Step "backup" @("-m", "sta", "backup")
 
-Write-Step "scan"
-& python -m sta scan --commit *>> $log
-
-Write-Step "track"
-& python -m sta track --catch-up *>> $log
-
-Write-Step "backup"
-& python -m sta backup *>> $log
-
-Write-Step "daily run finished (sync exit $syncExit)"
-exit $syncExit
+if ($failed) {
+    Write-Step "daily run finished with failures"
+    exit 1
+}
+Write-Step "daily run finished"
+exit 0

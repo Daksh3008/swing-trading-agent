@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date as Date
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from ..core.config import Settings
-from ..data.sync import business_days_behind, last_stored_date
+from ..core.market_calendar import latest_closed_session, sessions_behind
+from ..data.sync import attempted_since, last_stored_date
 from ..live.db import Database
 from ..live.settings import load_live_settings
 from ..live.signals import latest_session
@@ -117,12 +118,7 @@ def reason_label(value) -> str:
 def _latest_business_day(today: Date, now: datetime | None = None) -> Date:
     """Last session whose close is already published (16:00 IST cut-off)."""
     now = now or datetime.now()
-    day = today
-    if now.hour < 16:
-        day -= timedelta(days=1)
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day
+    return latest_closed_session(datetime.combine(today, now.time()))
 
 
 def _stamp_label(value) -> str | None:
@@ -136,27 +132,42 @@ def _stamp_label(value) -> str | None:
 
 
 def freshness(settings: Settings, db: Database) -> dict:
-    """Is the cached history current enough to trust a signal?"""
+    """Is the cached history current enough to trust a signal?
+
+    ``source_lag`` is the honest third state: the cache is behind the exchange
+    calendar, but a successful sync already ran after that close and upstream
+    still has no newer bar. It is shown as amber, never as "stale", and it does
+    not trigger another catch-up sync.
+    """
     session = latest_session(settings, db)
-    expected = _latest_business_day(Date.today())
-    behind = business_days_behind(session, expected)
+    expected = latest_closed_session()
+    behind = sessions_behind(session, expected)
     last_sync = db.last_sync_log()
     finished = db.last_finished_sync_log()
     coverage = db.get_json("sync.coverage", {}) or {}
+    universe_day = db.universe_day()
     files = len(list(settings.daily_dir.glob("*.parquet"))) if settings.daily_dir.exists() else 0
     status = "missing" if session is None else ("fresh" if behind <= 0 else "stale")
     # a single symbol at the new session does not make the cache current
     if (status == "fresh" and coverage.get("day") == expected.isoformat()
             and coverage.get("pct", 100) < 80):
         status = "stale"
+    source_lag = False
+    if status == "stale" and behind > 0 and attempted_since(db, expected):
+        status = "source_lag"
+        source_lag = True
     return {
         "status": status,
         "session": session,
         "session_label": day_label(session),
+        "expected": expected,
         "expected_label": day_label(expected),
         "behind": max(0, behind),
         "symbols": files,
         "coverage": coverage,
+        "universe_day": universe_day,
+        "newer_symbols": db.symbols_at(expected) if session else 0,
+        "source_lag": source_lag,
         "syncing": bool(last_sync and last_sync["finished_at"] is None),
         "last_sync_at": (finished["finished_at"] if finished else None),
         "last_sync_label": _stamp_label(finished["finished_at"]) if finished else None,
@@ -183,7 +194,7 @@ def signal_view(db: Database, row) -> dict:
     entry window is the next open, so yesterday's list cannot be entered now.
     """
     trade = db.trade_for_signal(row["id"])
-    actionable = str(row["signal_date"])[:10] == str(db.last_day() or "")
+    actionable = str(row["signal_date"])[:10] == str(db.trusted_day() or "")
     status = trade["status"] if trade else (None if actionable else "missed")
     return {
         "id": row["id"], "symbol": row["symbol"], "name": row["name"],
@@ -256,18 +267,24 @@ def tracker_view(settings: Settings, db: Database, *,
                  year: str | None = None, reason: str | None = None,
                  result: str | None = None, job: dict | None = None) -> dict:
     marks = db.latest_marks()
+    state = freshness(settings, db)
+    session_day = str(state["session"])[:10] if state["session"] else None
     open_rows = []
     for row in db.open_trades():
         mark = marks.get(row["id"])
         entry = float(row["entry_price"] or 0)
         marked = bool(mark and mark["close"] is not None)
         last = float(mark["close"]) if marked else None
+        mark_date = str(mark["date"])[:10] if marked else None
         open_rows.append({
             "id": row["id"], "symbol": row["symbol"],
             "entry_date": row["entry_date"], "entry_date_label": short_day(row["entry_date"]),
             "entry_price": entry, "shares": row["shares"],
             "marked": marked,
             "last": last,
+            "mark_date": mark_date,
+            "mark_date_label": short_day(mark_date) if mark_date else None,
+            "stale": bool(mark_date and session_day and mark_date < session_day),
             "unrealized": ((last - entry) * int(row["shares"] or 0)
                            if marked else None),
             "unrealized_pct": ((last / entry - 1.0) if marked and entry else None),
@@ -277,6 +294,7 @@ def tracker_view(settings: Settings, db: Database, *,
                                  if marked and row["stop_live"] else None),
         })
     open_rows.sort(key=lambda r: str(r["entry_date"] or ""), reverse=True)
+    stale_marks = sum(1 for r in open_rows if r["stale"])
 
     closed = [dict(r) for r in db.closed_trades()]
     years = sorted({str(r["exit_date"])[:4] for r in closed if r["exit_date"]},
@@ -298,8 +316,9 @@ def tracker_view(settings: Settings, db: Database, *,
         row["reason_label"] = reason_label(row["exit_reason"])
     return {
         "page": "tracker",
-        "freshness": freshness(settings, db),
+        "freshness": state,
         "open_rows": open_rows,
+        "stale_marks": stale_marks,
         "closed": filtered,
         "stats": trade_stats(filtered),
         "years": years, "reasons": reasons,
@@ -411,10 +430,15 @@ def data_view(settings: Settings, db: Database, job: dict | None = None) -> dict
         failures = failures_path.read_text(encoding="utf-8").splitlines()[:12]
     from ..live.ops import sync_lock_info
 
+    cursor = db.get_state("tracker.last_day")
+    trusted = db.trusted_day()
+    pending = (sum(1 for d in db.trading_days(start=cursor, end=trusted) if d > cursor)
+               if cursor and trusted else 0)
     return {
         "page": "data",
         "freshness": freshness(settings, db),
         "coverage": db.get_json("sync.coverage", {}) or {},
+        "universe_day": db.universe_day(),
         "counts": dict(counts),
         "synced_symbols": sum(counts.values()),
         "sync_state_coverage": (
@@ -428,9 +452,8 @@ def data_view(settings: Settings, db: Database, job: dict | None = None) -> dict
         "failures": failures,
         "schedule": settings.schedule,
         "job": job or {},
-        "tracker_cursor": db.get_state("tracker.last_day"),
-        "pending_days": len(db.trading_days(start=db.get_state("tracker.last_day")))
-                        if db.get_state("tracker.last_day") else 0,
+        "tracker_cursor": cursor,
+        "pending_days": pending,
     }
 
 

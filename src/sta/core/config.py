@@ -29,6 +29,7 @@ class DownloadConfig:
     workers: int = 8
     sleep: float = 0.25          # politeness delay per fetch (reference default)
     force: bool = False
+    gap_fill: bool = True        # repair a missing BSE session from the NSE listing
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,7 @@ def load_settings(path: Path | None = None) -> Settings:
             workers=int(dl_raw.get("workers", 8)),
             sleep=float(dl_raw.get("sleep", 0.25)),
             force=bool(dl_raw.get("force", False)),
+            gap_fill=bool(dl_raw.get("gap_fill", True)),
         ),
         live=LiveConfig(
             position_size=float(live_raw.get("position_size", 15_000.0)),

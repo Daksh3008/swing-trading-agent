@@ -11,6 +11,12 @@ previous session's high-water mark and average true range, never backwards.{% en
     <span class="count">{{ open_rows | length }} of {{ slots_max }} slots</span>
   </div>
   {% if open_rows %}
+  {% if stale_marks %}
+  <p class="note note--warn">{{ stale_marks }} position{{ "" if stale_marks == 1 else "s" }}
+    {{ "has" if stale_marks == 1 else "have" }} no bar for the newest session.
+    {{ "It is" if stale_marks == 1 else "They are" }} valued at the last recorded
+    close, never at cost, and will be re-marked when the session lands.</p>
+  {% endif %}
   <div class="table-wrap">
     <table class="grid">
       <caption class="visually-hidden">Open paper positions marked at the latest close</caption>
@@ -32,10 +38,13 @@ previous session's high-water mark and average true range, never backwards.{% en
         {% for row in open_rows %}
         <tr>
           <td><span class="sym">{{ row.symbol | replace(".BO", "") }}</span></td>
-          <td>{{ row.entry_date_label }}</td>
+          <td class="nowrap">{{ row.entry_date_label }}</td>
           <td class="num">{{ row.entry_price | money(2) }}</td>
           <td class="num">{{ row.shares }}</td>
-          <td class="num">{{ row.last | money(2) }}</td>
+          <td class="num">{{ row.last | money(2) }}
+            {% if row.mark_date %}
+            <span class="cell-sub {{ 'cell-sub--warn' if row.stale else '' }}">{{ "last close" if row.stale else "as of" }} {{ row.mark_date_label }}</span>
+            {% endif %}</td>
           <td class="num {{ row.unrealized | tone }}">{{ row.unrealized | money(0) }}
             <span class="cell-sub">{{ row.unrealized_pct | pct }}</span></td>
           <td class="num">{{ row.stop_live | money(2) }}</td>

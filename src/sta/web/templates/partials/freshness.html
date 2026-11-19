@@ -3,6 +3,14 @@
     {% if freshness.status == "fresh" %}
       <span class="dot dot--ok" aria-hidden="true"></span>
       <span>Price history is current through <strong>{{ freshness.session_label }}</strong>.</span>
+    {% elif freshness.status == "source_lag" %}
+      <span class="dot dot--warn" aria-hidden="true"></span>
+      <span><strong>{{ freshness.expected_label }}</strong> has no close from the data source yet.
+        The cache is complete through <strong>{{ freshness.session_label }}</strong>.
+        {% if freshness.newer_symbols %}
+          Only {{ freshness.newer_symbols }} of {{ freshness.symbols }} symbols reached it.
+        {% endif %}
+        This is an upstream gap, not a stale cache, so nothing is retried automatically.</span>
     {% elif freshness.status == "stale" %}
       <span class="dot dot--warn" aria-hidden="true"></span>
       {% if freshness.behind > 0 %}

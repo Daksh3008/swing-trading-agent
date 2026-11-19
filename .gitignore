@@ -5,9 +5,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# data (regenerable via `python -m sta download/compile/universe`)
-data/
-.txt
+# runtime data (regenerable via `python -m sta download/compile/universe`)
+/data/
+/*.txt
+
+# local agent files
 .agents
 skills-lock.json
 tasks.md
