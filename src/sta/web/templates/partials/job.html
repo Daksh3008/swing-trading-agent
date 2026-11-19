@@ -1,0 +1,40 @@
+{% if job and job.status and job.status != "idle" %}
+{% set polling = job.status == "running" or armed %}
+<div id="job" class="jobbar jobbar--{{ job.status }}"
+     {% if polling %}hx-get="/partials/job?poll=1" hx-trigger="load delay:{{ 1 if job.status != 'running' else 2 }}s" hx-swap="outerHTML"{% endif %}>
+  {% if job.status == "running" %}
+    <span class="dot dot--live" aria-hidden="true"></span>
+    <span><strong>{{ job.title }}</strong> — started {{ job.started_at }}. The page updates when it finishes.</span>
+    {% if job.progress and job.progress.total %}
+      {% set p = job.progress %}
+      <span class="jobbar__progress">
+        <span class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+              aria-valuenow="{{ p.pct }}" aria-label="Sync progress">
+          <span class="progress__fill" style="width: {{ p.pct }}%"></span>
+        </span>
+        <span class="progress__label">
+          {% if p.phase == "fetching" %}fetching{% elif p.phase == "writing" %}writing{% elif p.phase == "reading" %}reading cache{% else %}finalising{% endif %}
+          {{ p.current }} of {{ p.total }} · {{ p.pct }}%
+        </span>
+      </span>
+    {% endif %}
+  {% elif job.status == "error" %}
+    <span class="dot dot--bad" aria-hidden="true"></span>
+    <span><strong>{{ job.title }} failed.</strong> {{ job.message }}
+      <a href="#" onclick="location.reload();return false">Reload the page</a> once the cause is fixed.</span>
+  {% else %}
+    <span class="dot dot--ok" aria-hidden="true"></span>
+    <span><strong>{{ job.title }}</strong> finished at {{ job.finished_at }}.
+      {% if rejected %} Another job was already running; this request did not start.{% endif %}
+      {% set r = job.result or {} %}
+      {% if r.get("candidates") is not none %} {{ r.get("stored", 0) }} new suggestion{{ "" if r.get("stored") == 1 else "s" }}
+      {% if r.get("tracked") %} and {{ r["tracked"] }} queued{% endif %}.{% endif %}
+      {% if r.get("sync") %}{{ r["sync"].get("updated", 0) }} updated, {{ r["sync"].get("failed", 0) }} failed.{% endif %}
+      {% if r.get("scan") %}{{ r["scan"].get("stored", 0) }} new suggestion{{ "" if r["scan"].get("stored") == 1 else "s" }}.{% endif %}
+      {% if r.get("days") is not none %}{{ r["days"] }} session{{ "" if r.get("days") == 1 else "s" }} replayed.{% endif %}
+    </span>
+  {% endif %}
+</div>
+{% else %}
+<div id="job" class="jobbar-slot"></div>
+{% endif %}

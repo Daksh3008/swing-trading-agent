@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Data{% endblock %}
+{% block heading %}Data{% endblock %}
+{% block lede %}The cache is the only input to every signal. If it is behind, the
+suggestions are behind with it.{% endblock %}
+
+{% block content %}
+<section aria-labelledby="status-h">
+  <div class="sectionbar">
+    <h2 id="status-h">Sync status</h2>
+    <div class="sectionbar__actions">
+      <form method="post" action="/runs/sync" hx-post="/runs/sync" hx-target="#job" hx-swap="outerHTML">
+        <button class="btn btn--small btn--primary" type="submit">Sync now</button>
+      </form>
+    </div>
+  </div>
+
+  <dl class="facts">
+    <div><dt>Last bar</dt><dd>{{ freshness.session_label }}</dd></div>
+    <div><dt>Expected</dt><dd>{{ freshness.expected_label }}</dd></div>
+    <div><dt>Trading days</dt><dd>{{ trading_days }}</dd></div>
+    <div><dt>Symbols cached</dt><dd>{{ freshness.symbols }}</dd></div>
+    <div><dt>Symbols in sync state</dt><dd>{{ sync_state_coverage }}</dd></div>
+    <div><dt>Last run</dt><dd>{% if freshness.last_sync_label %}{{ freshness.last_sync_label }}{% else %}Never{% endif %}</dd></div>
+    <div><dt>Run status</dt><dd>{{ last_log.status if last_log else "—" }}</dd></div>
+    <div><dt>Symbols updated</dt><dd>{{ last_log.updated if last_log else "—" }}</dd></div>
+    <div><dt>Full refreshes</dt><dd>{{ last_log.refreshed if last_log else "—" }}</dd></div>
+    <div><dt>Failures</dt><dd>{{ last_log.failed if last_log else "—" }}</dd></div>
+    <div><dt>Duration</dt><dd>{% if last_log and last_log.duration_s %}{{ "%.0f" | format(last_log.duration_s) }} s{% else %}—{% endif %}</dd></div>
+    <div><dt>Tracker cursor</dt><dd>{{ tracker_cursor | day if tracker_cursor else "Not started" }}</dd></div>
+    <div><dt>Sessions to replay</dt><dd>{{ pending_days }}</dd></div>
+  </dl>
+
+  <div class="sectionbar sectionbar--sub">
+    <h2 class="h2-sub">Symbols current at the latest session</h2>
+  </div>
+  {% if coverage %}
+    {% set pct = coverage.pct %}
+    <div class="coverage">
+      <div class="coverage__head">
+        <span class="coverage__day">Session {{ coverage.day | day }}</span>
+        <span class="coverage__counts">{{ coverage.at_session }} of {{ coverage.total }}
+          symbols have a bar · {{ pct }}%</span>
+      </div>
+      <span class="progress progress--tall{% if pct < 80 %} progress--warn{% endif %}"
+            role="progressbar" aria-valuemin="0" aria-valuemax="100"
+            aria-valuenow="{{ pct }}" aria-label="Symbols synced to the latest session">
+        <span class="progress__fill" style="width: {{ pct }}%"></span>
+      </span>
+      <p class="hint">A symbol counts when its newest stored bar is the latest closed
+        session. The rest are stale, suspended, or waiting on Yahoo.</p>
+    </div>
+  {% else %}
+    <div class="empty">
+      <p>No coverage recorded yet.</p>
+      <p class="empty__hint">The next sync writes this figure: how many of the
+        {{ freshness.symbols }} cached symbols reached the latest session.</p>
+    </div>
+  {% endif %}
+
+  <div class="sectionbar sectionbar--sub">
+    <h2 class="h2-sub">Scheduled runs</h2>
+  </div>
+  <p class="note">Daily at {{ schedule.time }} {{ schedule.timezone }}, plus a catch-up
+    task at logon. Enable them once with the command in the README; the app also
+    checks for stale data on startup.</p>
+
+  {% if lock %}
+  <div class="flash">
+    {% if lock.orphaned %}
+      A sync lock is held by a process that no longer exists
+      ({{ lock.age_minutes }} minutes old). Clear it to allow new syncs.
+    {% else %}
+      A sync lock is held ({{ lock.age_minutes }} minutes old). If no sync is
+      running, it is left over from an interrupted run and blocks new ones.
+    {% endif %}
+    <form method="post" action="/data/unlock" class="inline-form">
+      <button class="btn btn--small" type="submit" {% if not lock.stale %}disabled{% endif %}>
+        {{ "Clear stale lock" if lock.stale else "Lock is recent — wait" }}
+      </button>
+    </form>
+  </div>
+  {% endif %}
+</section>
+
+<section class="block" aria-labelledby="flags-h">
+  <div class="sectionbar">
+    <h2 id="flags-h">Flagged symbols</h2>
+    <span class="count">{{ flagged_total }} flagged</span>
+  </div>
+
+  {% if suspicious %}
+  <h3 class="h3-sub">Suspicious history — never emits signals</h3>
+  <div class="table-wrap">
+    <table class="grid grid--compact">
+      <caption class="visually-hidden">Symbols with unexplained large moves</caption>
+      <thead><tr><th scope="col">Symbol</th><th scope="col" class="num">Last bar</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        {% for row in suspicious %}
+        <tr><td class="sym">{{ row.symbol }}</td><td class="num">{{ row.last_date }}</td><td>{{ row.error }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if stale %}
+  <h3 class="h3-sub">Stale — no recent bar, retried once</h3>
+  <div class="table-wrap">
+    <table class="grid grid--compact">
+      <caption class="visually-hidden">Symbols lagging the expected session</caption>
+      <thead><tr><th scope="col">Symbol</th><th scope="col" class="num">Last bar</th><th scope="col">Note</th></tr></thead>
+      <tbody>
+        {% for row in stale %}
+        <tr><td class="sym">{{ row.symbol }}</td><td class="num">{{ row.last_date }}</td><td>{{ row.error }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if failed %}
+  <h3 class="h3-sub">Failed this run</h3>
+  <div class="table-wrap">
+    <table class="grid grid--compact">
+      <caption class="visually-hidden">Symbols that failed to fetch</caption>
+      <thead><tr><th scope="col">Symbol</th><th scope="col">Error</th></tr></thead>
+      <tbody>
+        {% for row in failed %}
+        <tr><td class="sym">{{ row.symbol }}</td><td>{{ row.error }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if not suspicious and not stale and not failed %}
+  <div class="empty">
+    <p>Nothing flagged. Every cached symbol reached the expected session with a
+      consistent split factor.</p>
+  </div>
+  {% endif %}
+
+  {% if failures %}
+  <details class="details">
+    <summary>Last sync failure log ({{ failures | length }} lines)</summary>
+    <pre class="loglines">{% for line in failures %}{{ line }}
+{% endfor %}</pre>
+  </details>
+  {% endif %}
+</section>
+{% endblock %}

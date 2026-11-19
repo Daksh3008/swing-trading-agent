@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Today{% endblock %}
+{% block heading %}Today{% endblock %}
+{% block lede %}{% if auto_track %}Suggestions from the {{ signal_day_label }} close, ranked.
+Every name is queued automatically; the five best scores take the slots.
+{% else %}Suggestions from the {{ signal_day_label }} close. Each one fills at the
+next session's open if you track it.{% endif %}{% endblock %}
+
+{% block content %}
+<section class="ledgerhead" aria-label="Account">
+  <div class="ledgerhead__figure">
+    <span class="label">Paper NAV</span>
+    <strong class="figure">{{ nav | money(0) }}</strong>
+    {% if nav_delta is not none %}
+      <span class="delta {{ nav_delta | tone }}">{{ nav_delta | money(0) }}
+        <span class="delta__pct">{{ nav_delta_pct | pct }}</span></span>
+    {% else %}
+      <span class="delta">No completed session yet</span>
+    {% endif %}
+  </div>
+  <dl class="ledgerhead__facts">
+    <div><dt>Slots</dt><dd>{{ slots_used }} of {{ slots_max }} used</dd></div>
+    <div><dt>Position size</dt><dd>{{ position_size | money(0) }}</dd></div>
+    <div><dt>Auto-track</dt><dd>{{ "On" if auto_track else "Off" }}</dd></div>
+    <div><dt>Signal day</dt><dd>{{ signal_day_label }}</dd></div>
+  </dl>
+</section>
+
+<div class="sectionbar">
+  <h2>Suggestions</h2>
+  <div class="sectionbar__actions">
+    <form method="post" action="/runs/track" hx-post="/runs/track" hx-target="#job" hx-swap="outerHTML">
+      <button class="btn btn--small" type="submit">Replay missed sessions</button>
+    </form>
+    <form method="post" action="/runs/scan" hx-post="/runs/scan" hx-target="#job" hx-swap="outerHTML">
+      <button class="btn btn--small btn--primary" type="submit">Run scan</button>
+    </form>
+  </div>
+</div>
+
+{% if recent_exits %}
+<section class="block" aria-labelledby="exits-h">
+  <div class="sectionbar">
+    <h2 id="exits-h">Closed by the rules</h2>
+    <span class="count">{{ recent_exits | length }} exit{{ "" if recent_exits | length == 1 else "s" }}</span>
+  </div>
+  <ul class="exits">
+    {% for e in recent_exits %}
+    <li>
+      <span class="exits__sym">{{ e.symbol | replace(".BO", "") }}</span>
+      <span class="exits__reason">{{ e.exit_reason }}</span>
+      <span class="exits__price">at {{ e.exit_price | money(2) }}</span>
+      <span class="exits__pct {{ e.return_pct | tone }}">{{ e.return_pct | pct }}</span>
+      <span class="exits__pnl {{ e.pnl | tone }}">{{ e.pnl | money(0) }}</span>
+      <span class="exits__when">{{ e.exit_date_label }} · {{ e.days_held }} sessions</span>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="note">A desktop notification is raised for every exit. The tracker
+    applies the rule at the close it fired on, so the price shown is the fill.</p>
+</section>
+{% endif %}
+
+{% if signals %}
+<div class="table-wrap">
+  <table class="grid">
+    <caption class="visually-hidden">Trade suggestions for {{ signal_day_label }}</caption>
+    <thead>
+      <tr>
+        <th scope="col">Symbol</th>
+        <th scope="col" class="num">Score</th>
+        <th scope="col" class="num">Close</th>
+        <th scope="col" class="num">Qty</th>
+        <th scope="col" class="num">Stop</th>
+        <th scope="col" class="num">Risk</th>
+        <th scope="col" class="num">Off high</th>
+        <th scope="col">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in signals %}
+        {% include "partials/signal_row.html" %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="note">Qty is whole shares for one slot of {{ position_size | money(0) }}.
+  Risk is the rupee loss if the initial stop fills.</p>
+
+{% if queued %}
+<div class="queuebar">
+  <span class="queuebar__label">Queued for the next open</span>
+  <span class="queuebar__list">
+    {% for q in queued %}{{ q.symbol | replace(".BO", "") }}{% if not loop.last %} · {% endif %}{% endfor %}
+  </span>
+  <span class="queuebar__count">
+    {{ queued | length }} for {{ free_slots }} free slot{{ "" if free_slots == 1 else "s" }}
+    {% if queued | length > free_slots %}— the best-ranked fill; the rest expire{% endif %}
+  </span>
+</div>
+{% endif %}
+{% else %}
+<div class="empty">
+  <p>No suggestions stored for this session.</p>
+  <p class="empty__hint">Run a scan after the close. If the universe is empty, sync first.</p>
+</div>
+{% endif %}
+{% endblock %}

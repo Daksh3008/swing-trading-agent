@@ -1,0 +1,30 @@
+<div class="freshness freshness--{{ freshness.status }}">
+  <div class="freshness__main">
+    {% if freshness.status == "fresh" %}
+      <span class="dot dot--ok" aria-hidden="true"></span>
+      <span>Price history is current through <strong>{{ freshness.session_label }}</strong>.</span>
+    {% elif freshness.status == "stale" %}
+      <span class="dot dot--warn" aria-hidden="true"></span>
+      {% if freshness.behind > 0 %}
+        <span>Data is <strong>{{ freshness.behind }} trading day{{ "" if freshness.behind == 1 else "s" }}</strong>
+          behind. Last bar {{ freshness.session_label }}; the exchange closed at
+          {{ freshness.expected_label }}.</span>
+      {% else %}
+        <span><strong>{{ freshness.coverage.at_session }} of {{ freshness.coverage.total }}</strong>
+          symbols have a bar for {{ freshness.expected_label }}
+          ({{ freshness.coverage.pct }}%). Yahoo has not published the rest.</span>
+      {% endif %}
+    {% else %}
+      <span class="dot dot--bad" aria-hidden="true"></span>
+      <span>No price history yet. Run a sync to download it.</span>
+    {% endif %}
+    <span class="freshness__meta">{{ freshness.symbols }} symbols ·
+      {% if freshness.syncing %}syncing now…{% elif freshness.last_sync_label %}synced {{ freshness.last_sync_label }}{% else %}never synced{% endif %}</span>
+  </div>
+  <form method="post" action="/runs/sync" hx-post="/runs/sync" hx-target="#job"
+        hx-swap="outerHTML" class="freshness__action">
+    <button class="btn btn--small" type="submit">Sync now</button>
+  </form>
+</div>
+
+{% include "partials/job.html" %}

@@ -6,7 +6,7 @@ Concrete implementations live in ``sta.data`` and are wired at the CLI edge.
 
 from __future__ import annotations
 
-from typing import Optional, Protocol
+from typing import Protocol
 
 import pandas as pd
 
@@ -18,4 +18,4 @@ class HistoryProvider(Protocol):
     any other loader of daily bars.
     """
 
-    def history(self, symbol: str) -> Optional[pd.DataFrame]: ...
+    def history(self, symbol: str) -> pd.DataFrame | None: ...

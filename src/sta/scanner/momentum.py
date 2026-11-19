@@ -58,7 +58,8 @@ class MomentumScanner(Scanner):
         ``membership`` is the universe span frame."""
         self.params = params or ScannerParams()
         self._spans = self._index_spans(membership)
-        self._by_day = self._build_feature_days(histories)
+        self._by_day = self._build_feature_days(
+            histories, include_alt_gates=self.params.trend_mode != "sma")
 
     # ------------------------------------------------------------------ scan
 
@@ -86,11 +87,12 @@ class MomentumScanner(Scanner):
         return spans
 
     @staticmethod
-    def _build_feature_days(histories: dict[str, pd.DataFrame]) -> dict[Date, pd.DataFrame]:
+    def _build_feature_days(histories: dict[str, pd.DataFrame],
+                            include_alt_gates: bool = True) -> dict[Date, pd.DataFrame]:
         """Group the full feature frame once by date -> O(1) per scan day."""
         frames = []
         for symbol, hist in histories.items():
-            feats = compute_features(hist)
+            feats = compute_features(hist, include_alt_gates=include_alt_gates)
             feats["symbol"] = symbol
             feats["close"] = hist["close"].values
             feats["volume"] = hist["volume"].values

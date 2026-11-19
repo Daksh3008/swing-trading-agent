@@ -1,80 +1,145 @@
 # Swing Trading Agent (STA)
 
 Research system for momentum swing trading on Indian mid-cap, small-cap, and
-micro-cap equities (NSE + BSE), targeting few-but-large wins: cut losers at
--10%, let winners run to +30%, 1 week to 2 months hold, ₹15k per position,
-₹60k book (4 concurrent slots).
+micro-cap equities (NSE + BSE), plus a local paper-trading desk that turns the
+validated strategy into a daily workflow.
 
-**Status: research only — no live trading, no order execution.**
+**Status: research + paper trading only — no broker integration, no order
+execution.** The app binds to `127.0.0.1` and assumes one trusted user.
 
-## Commands
+Position: ₹15,000 per slot, 5 concurrent slots (₹75,000 book — the validated
+backtests used 4), 10% initial stop, 3×ATR(22) chandelier trailing stop, winners
+run.
+
+## Quick start
 
 ```bash
+pip install -e ".[dev]"
+
 python -m sta universe                     # market-cap scan -> data/universe/membership.parquet
-python -m sta download                     # max-history parquet per universe symbol -> data/daily/
-python -m sta backtest --start 2019-06-01 --end 2026-10-31
+python -m sta download                     # max-history parquet per universe symbol
+
+python -m sta sync                         # incremental daily refresh (minutes)
+python -m sta scan --commit                # today's suggestions -> data/app.db
+python -m sta track                        # fill/exit/replay paper trades
+python -m sta.web                          # http://127.0.0.1:8000
 ```
 
-Strategy variants (same data, comparable outputs):
+`python -m sta.web` is the same as `python -m sta web`.
 
-```bash
-python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant baseline
-python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant kama        # KAMA trend gate
-python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant trailing    # 3xATR chandelier, no fixed target
-python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant trailing_kama
-python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant trend_exit  # exit on close < MA20
+## Daily workflow
+
+1. Open <http://127.0.0.1:8000>.
+2. Check the freshness strip. Amber means the cache is behind — press **Sync now**
+   (or fix the scheduler, see below).
+3. On **Today**, review the suggestions: score, close, quantity for one slot,
+   initial stop, rupee risk, distance to the 52-week high.
+4. Press **Track** on the ones you would take, **Skip** on the rest. With
+   auto-track on, every suggestion is queued automatically.
+5. After the next session's data lands, **Tracker** shows fills, live stops,
+   high-water marks and unrealised P&L; **Performance** shows the equity curve,
+   yearly P&L and why each trade ended.
+6. Record the real fill price in your broker; the app tracks paper prices only.
+
+The tracker replays sessions in order, so a laptop that was off for three days
+produces the same state as three daily runs.
+
+## Scheduling (Windows Task Scheduler)
+
+Register once, from the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\register_tasks.ps1
 ```
 
-Add `--limit N` for fast smoke tests. Results land in `data/backtest_<variant>/`.
+That creates:
 
-All commands accept `-v` for debug logging and `--config` for an alternate
-`settings.toml` (flags may appear before or after the subcommand).
+- **STA Daily** — `scripts\run_daily.ps1` at 18:30: `sync --catch-up` →
+  `scan --commit` → `track --catch-up` → `backup`, logging to
+  `data/logs/daily_YYYYMMDD.log`.
+- **STA Catch-up** — `scripts\run_catchup.ps1` at logon: the same sequence,
+  skipping work that is already done.
+
+Equivalent manual commands:
+
+```powershell
+schtasks /Create /SC DAILY /ST 18:30 /TN "STA Daily" /TR "powershell -ExecutionPolicy Bypass -File <repo>\scripts\run_daily.ps1"
+schtasks /Create /SC ONLOGON /TN "STA Catch-up" /TR "powershell -ExecutionPolicy Bypass -File <repo>\scripts\run_catchup.ps1"
+```
+
+Remove them with `scripts\register_tasks.ps1 -Remove`. The app never registers
+tasks itself; it also runs a catch-up sync on startup when the data is stale
+(disable with `STA_AUTOSYNC=0`, or write `1` to the `app.autosync_disabled`
+key in `data/app.db`).
+
+`data/.sync.lock` is an exclusive lock so the scheduler, the CLI and the app can
+never sync at the same time. A killed run can leave it behind; **Data** offers a
+**Clear stale lock** button once it is older than 15 minutes.
+
+## Pages
+
+| Page | What it answers |
+|---|---|
+| `/` Today | What should I do with the latest session? Freshness, NAV, suggestions, Track/Skip, Run scan |
+| `/tracker` | What is open, how is it doing, and how did past trades end? Filters + CSV export |
+| `/performance` | Equity curve, yearly P&L, win rate, profit factor, expectancy, exit-reason mix |
+| `/data` | Last sync, coverage, stale/suspicious/failed symbols, lock state, Sync now |
+| `/settings` | Position size, slots, suggestions per session, auto-track |
+
+Long jobs (sync, scan, replay) run in a background thread; the banner polls
+`/partials/job` and reloads the page when the job finishes.
 
 ## Layout
 
 ```
-src/sta/core/       domain models, interfaces (Protocols), config  — no I/O
-src/sta/data/       yfinance per-ticker fetcher (parquet cache),
-                    market-cap universe builder, store shim
+src/sta/core/       domain models, interfaces (Protocols), config — no I/O
+src/sta/data/       yfinance fetcher, universe builder, incremental sync, store shim
 src/sta/scanner/    per-symbol momentum features + cross-sectional scanner
-src/sta/backtest/   cost model, event engine (stop/target/circuit rules), runner
-src/sta/report/     daily research reports (planned)
+src/sta/backtest/   cost model, event engine, runner
+src/sta/live/       rules (single source of truth), signals, tracker, SQLite, ops
+src/sta/web/        FastAPI app, Jinja templates, vendored HTMX/Chart.js/fonts
+scripts/            run_daily.ps1, run_catchup.ps1, register_tasks.ps1
+config/             settings.toml (all behavior knobs)
 ```
+
+### One source of truth for rules
+
+`src/sta/live/rules.py` owns every stop and exit decision. The backtest engine
+and the paper tracker both import it, so research and live paper trading cannot
+drift. `tests/test_parity.py` replays identical histories through both and
+compares every closed trade (symbol, dates, prices, reason, shares, P&L);
+`tests/test_golden.py` does the same on the real cache over the last 12 months.
 
 ## Data notes
 
-- Pipeline replicates `updated_stock_finder/src/fetch.py`: yfinance
-  `Ticker.history(period="max", interval="1d", auto_adjust=False)` per
-  ticker — OHLCV + `Adj_Close`, cached as **parquet** (`data/daily/TICKER.parquet`)
-  instead of CSV, resumable (existing files are skipped unless `--force`).
-- Universe: `Equity.csv` (4,720 BSE `.BO` tickers, reference project) filtered
-  by market cap to micro/small/mid caps ≤ ₹50,000 cr
-  (`data/universe/membership.parquet`; raw caps cached in
-  `data/universe/market_caps.parquet`). Cap bands: micro < ₹5,000 cr,
-  small < ₹25,000 cr, mid ≤ ₹50,000 cr.
-- Known Yahoo glitch: some tickers occasionally return stub responses;
-  the fetcher retries and keeps the longest response, and stub caches
-  (<30 rows) are treated as missing.
-- Caveat: yfinance history has survivorship bias — delisted tickers are
-  absent. The previous bhavcopy pipeline (deleted 2026-11-14) was the
-  anti-survivorship source; see `tasks.md`.
-
-## Backtest realism (v1)
-
-- Signals on day-D close → entries at D+1 open.
-- Stops fill at the stop price, or at the open when gapped through.
-- Lower-circuit lock days cannot be exited (position freezes).
-- Costs: STT 0.1% both sides (delivery), statutory charges, ₹20/order,
-  GST — see `backtest/costs.py`.
-- Metrics: net Sharpe, CAGR, max drawdown, win rate, expectancy, profit
-  factor — reported net of all costs.
+- Source: yfinance `Ticker.history(period="max", interval="1d",
+  auto_adjust=False)` per ticker, cached as parquet in `data/daily/TICKER.parquet`.
+- **Incremental sync** re-fetches the last 7 stored bars plus the missing tail,
+  dedupes by date, and compares the overlapping closes. A >0.5% difference means
+  Yahoo rewrote history (split/bonus) → that symbol is fully refreshed.
+- **Batched fetch**: ~50 symbols per `yf.download` call, bisected on failure so
+  one bad ticker cannot fail a chunk, with a per-ticker fallback.
+- **NSE fallback**: ~300 BSE tickers have a broken daily feed on Yahoo. Their
+  history came from the company's `.NS` listing; `data/universe/ns_fallbacks.csv`
+  records the substitution and the sync keeps fetching the same source, so
+  prices do not flip between exchanges.
+- **Calendar guard**: the expected session is the newest date most symbols
+  reached. Symbols more than 3 trading days behind are retried once, then listed
+  as stale in `data/universe/sync_failures.csv` and on `/data`.
+- **Quality gate**: a >35% one-day move that the split factor
+  (`Adj_Close / Close`) does not explain is flagged. Flags in the last 90 bars
+  block that symbol from emitting signals. Stub responses never overwrite a
+  multi-year history.
+- **Atomic writes**: temp file + replace, so a killed sync cannot corrupt a
+  symbol's history.
+- Caveat: yfinance history has survivorship bias — delisted tickers are absent.
 
 ## Strategy (validated)
 
-Default variant is **trailing**: the Phase-1 momentum scanner (52w-high
-proximity, top-15% 3-month RS, 2x volume surge, rising MA structure) with a
-**3xATR(22) chandelier trailing stop** in place of the fixed +30% target
-(the 10% hard stop stays until the trailing stop ratchets above it).
+Default variant is **trailing**: the Phase-1 momentum scanner (52-week-high
+proximity, top-15% 3-month RS, 2× volume surge, rising MA structure) with a
+**3×ATR(22) chandelier trailing stop** in place of a fixed +30% target. The 10%
+hard stop stays until the trailing stop ratchets above it.
 
 Full universe (4,133 symbols), 2020-06 → 2026-10, net of costs:
 
@@ -83,20 +148,52 @@ Full universe (4,133 symbols), 2020-06 → 2026-10, net of costs:
 | Baseline (+30% target) | 2.03 | 31.0% | -21.6% |
 | Trailing 3xATR22 | **4.90** | **59.5%** | **-13.0%** |
 
-Gate-flavor experiments (KAMA, RMA, RMA finetuned) were rejected: none
-survived out-of-sample split validation against trailing-only. Conclusion:
-exits carry the edge; MA flavor does not.
+Gate-flavor experiments (KAMA, RMA, RMA finetuned) were rejected: none survived
+out-of-sample split validation against trailing-only. Conclusion: exits carry
+the edge; MA flavor does not.
 
-Caveat: yfinance history has survivorship bias and fills are idealized
-(stops at the stop price, target at the target), so treat absolute Sharpe
-as optimistic. Relative ordering has been stable across every slice tested.
+Exit reasons the tracker records: `stop_initial`, `stop_trailing`,
+`stop_profit_lock`, `stop_failed_breakout`, `stop_atr_collapsed`, `time`,
+`target`, `trend`.
+
+Caveat: fills are idealized (stops at the stop price, targets at the target) and
+history is survivorship-biased, so absolute Sharpe is optimistic. Relative
+ordering has been stable across every slice tested.
+
+## Backtest realism
+
+- Signals on the day-D close → entries at the D+1 open.
+- Stops fill at the stop price, or at the open when gapped through.
+- Lower-circuit lock days cannot be exited (the position freezes).
+- No same-day re-entry into a symbol that exited that session.
+- Time stop at 40 sessions, only when the trade is not in profit.
+- Costs: STT 0.1% both sides (delivery), statutory charges, ₹20/order, GST —
+  see `backtest/costs.py`.
 
 ## Testing
 
 ```bash
-python -m pytest tests/ -q
+python -m pytest tests -q                    # fast, offline, no network
+$env:STA_GOLDEN = "1"; python -m pytest tests/test_golden.py -q   # real cache
 ```
 
-8 unit tests cover the momentum scanner and the backtest engine (stops,
-targets, circuit freezes, costs). Tests for the deleted bhavcopy pipeline
-were removed with it.
+The suite covers rule invariants (monotonic stops, profit floors, time-stop
+suppression, same-day re-entry), engine/tracker parity, sync idempotency with a
+mocked upstream, SQLite CRUD, and the web app via `TestClient`. The golden test
+is opt-in because it reads real data.
+
+## Configuration
+
+`config/settings.toml` holds defaults for download, universe, `[live]` (position
+size, slots, auto-track, suggestions) and `[schedule]` (time, timezone). Runtime
+changes made on `/settings` are stored in `data/app.db` (`app_state`) and win
+over the file.
+
+```bash
+python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant trailing
+python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant baseline
+python -m sta backtest --start 2020-01-01 --end 2026-10-31 --variant trend_exit
+```
+
+All commands accept `-v` for debug logging and `--config` for an alternate
+`settings.toml` (flags may appear before or after the subcommand).

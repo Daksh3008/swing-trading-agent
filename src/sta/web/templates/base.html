@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Paper desk{% endblock %} · STA</title>
+<link rel="stylesheet" href="/static/fonts.css">
+<link rel="stylesheet" href="/static/app.css?v={{ asset_version('app.css') }}">
+<script src="/static/vendor/htmx.min.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="shell">
+  <aside class="rail">
+    <a class="brand" href="/">
+      <span class="brand__name">STA</span>
+      <span class="brand__sub">paper desk</span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      {% set current = page %}
+      <a href="/" class="nav__link{% if current == 'today' %} is-current{% endif %}"
+         {% if current == 'today' %}aria-current="page"{% endif %}>Today</a>
+      <a href="/tracker" class="nav__link{% if current == 'tracker' %} is-current{% endif %}"
+         {% if current == 'tracker' %}aria-current="page"{% endif %}>Tracker</a>
+      <a href="/performance" class="nav__link{% if current == 'performance' %} is-current{% endif %}"
+         {% if current == 'performance' %}aria-current="page"{% endif %}>Performance</a>
+      <a href="/data" class="nav__link{% if current == 'data' %} is-current{% endif %}"
+         {% if current == 'data' %}aria-current="page"{% endif %}>Data</a>
+      <a href="/settings" class="nav__link{% if current == 'settings' %} is-current{% endif %}"
+         {% if current == 'settings' %}aria-current="page"{% endif %}>Settings</a>
+    </nav>
+    <p class="rail__note">Local only.<br>Nothing is sent to a broker.</p>
+  </aside>
+
+  <div class="desk" id="main">
+    <header class="masthead">
+      <div class="masthead__title">
+        <h1>{% block heading %}{% endblock %}</h1>
+        <p class="lede">{% block lede %}{% endblock %}</p>
+      </div>
+      <div class="stamp" role="group" aria-label="Last session">
+        <span class="stamp__label">Session</span>
+        <strong class="stamp__date">{{ freshness.session_label }}</strong>
+        <span class="stamp__note">BSE close · 15:30 IST</span>
+      </div>
+    </header>
+
+    {% include "partials/freshness.html" %}
+
+    {% block content %}{% endblock %}
+
+    <footer class="foot">
+      <p>Paper trading only. Suggested prices are session closes; fills are
+         modelled at the next open and no order reaches an exchange.</p>
+      <p class="foot__caveat">History comes from yfinance, which excludes delisted
+         tickers. Treat every figure as survivorship-biased and optimistic.</p>
+    </footer>
+  </div>
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -9,7 +9,6 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from datetime import date as Date
-from typing import Optional
 
 
 class Exchange(str, enum.Enum):
@@ -55,8 +54,8 @@ class SymbolMeta:
     isin: str
     name: str
     series: str  # NSE series (EQ/BE/...) or BSE group (A/B/T/...)
-    first_date: Optional[Date] = None
-    last_date: Optional[Date] = None
+    first_date: Date | None = None
+    last_date: Date | None = None
 
 
 @dataclass(frozen=True)

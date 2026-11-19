@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block title %}Performance{% endblock %}
+{% block heading %}Performance{% endblock %}
+{% block lede %}Every paper trade the tracker has closed, net of modelled costs.
+The curve starts the first session the tracker replayed.{% endblock %}
+
+{% block content %}
+<dl class="statrow statrow--wide">
+  <div><dt>Trades</dt><dd>{{ stats.trades }}</dd></div>
+  <div><dt>Win rate</dt><dd>{{ stats.win_rate | pct(1, False) }}</dd></div>
+  <div><dt>Profit factor</dt><dd>{{ "%.2f" | format(stats.profit_factor) if stats.profit_factor else "—" }}</dd></div>
+  <div><dt>Expectancy</dt><dd>{{ stats.expectancy | money(0) }}</dd></div>
+  <div><dt>Average hold</dt><dd>{{ "%.0f" | format(stats.avg_hold) if stats.avg_hold else "—" }} days</dd></div>
+  <div><dt>Max drawdown</dt><dd>{{ max_drawdown | pct(1) }}</dd></div>
+</dl>
+
+<section class="block" aria-labelledby="eq-h">
+  <div class="sectionbar">
+    <h2 id="eq-h">Equity</h2>
+    <span class="count">{% if start %}{{ start | day }} to {{ end | day }}{% endif %}</span>
+  </div>
+  {% if equity | length > 1 %}
+  <div class="chart chart--equity"><canvas id="equity-chart" aria-label="Paper equity curve" role="img"></canvas></div>
+  {% else %}
+  <div class="empty">
+    <p>Not enough sessions yet to draw a curve.</p>
+    <p class="empty__hint">The chart appears once the tracker has replayed two or more sessions.</p>
+  </div>
+  {% endif %}
+</section>
+
+<div class="split block">
+  <section aria-labelledby="year-h">
+    <div class="sectionbar">
+      <h2 id="year-h">P&amp;L by year</h2>
+    </div>
+    {% if yearly %}
+    <div class="chart chart--bars"><canvas id="year-chart" aria-label="Realised P&L by calendar year" role="img"></canvas></div>
+    <table class="grid grid--compact">
+      <caption class="visually-hidden">Realised P&amp;L by year</caption>
+      <thead><tr><th scope="col">Year</th><th scope="col" class="num">Trades</th><th scope="col" class="num">Wins</th><th scope="col" class="num">P&amp;L</th></tr></thead>
+      <tbody>
+        {% for y in yearly %}
+        <tr>
+          <td>{{ y.year }}</td>
+          <td class="num">{{ y.trades }}</td>
+          <td class="num">{{ y.wins }}</td>
+          <td class="num {{ y.pnl | tone }}">{{ y.pnl | money(0) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty"><p>No closed trades yet.</p></div>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="reason-h">
+    <div class="sectionbar">
+      <h2 id="reason-h">How trades ended</h2>
+    </div>
+    {% if reasons %}
+    <ul class="breakdown">
+      {% for r in reasons %}
+      <li>
+        <span class="breakdown__label">{{ r.label }}</span>
+        <span class="breakdown__bar"><span style="width: {{ (r.share * 100) | round(1) }}%"></span></span>
+        <span class="breakdown__value">{{ r.count }}</span>
+        <span class="breakdown__pnl {{ r.pnl | tone }}">{{ r.pnl | money(0) }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty"><p>No exits to attribute yet.</p></div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/chart.umd.min.js"></script>
+<script id="chart-data" type="application/json">{{ {"equity": equity, "yearly": yearly} | tojson }}</script>
+<script>
+(function () {
+  var payload = JSON.parse(document.getElementById("chart-data").textContent);
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var ink = "#171B1E", soft = "#4E5A61", rule = "#C3CDD3";
+  var indigo = "#1F3A93", green = "#1D6B4F", red = "#B23A2B";
+
+  Chart.defaults.font.family = "'IBM Plex Sans', system-ui, sans-serif";
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = soft;
+
+  var equity = payload.equity || [];
+  var eqCanvas = document.getElementById("equity-chart");
+  if (eqCanvas && equity.length > 1) {
+    new Chart(eqCanvas, {
+      type: "line",
+      data: {
+        labels: equity.map(function (p) { return p.day; }),
+        datasets: [{
+          data: equity.map(function (p) { return p.nav; }),
+          borderColor: indigo,
+          borderWidth: 1.6,
+          backgroundColor: "rgba(31,58,147,0.06)",
+          fill: true,
+          pointRadius: 0,
+          tension: 0.15
+        }]
+      },
+      options: {
+        animation: reduced ? false : { duration: 500 },
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            displayColors: false,
+            callbacks: {
+              label: function (ctx) {
+                var v = ctx.parsed.y;
+                return "₹" + Math.round(v).toLocaleString("en-IN");
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: { display: false },
+            border: { color: rule },
+            ticks: { maxTicksLimit: 6, maxRotation: 0 }
+          },
+          y: {
+            grid: { color: rule, drawTicks: false },
+            border: { display: false },
+            ticks: {
+              maxTicksLimit: 5,
+              callback: function (v) { return "₹" + Math.round(v / 1000) + "k"; }
+            }
+          }
+        }
+      }
+    });
+  }
+
+  var yearly = payload.yearly || [];
+  var yearCanvas = document.getElementById("year-chart");
+  if (yearCanvas && yearly.length) {
+    new Chart(yearCanvas, {
+      type: "bar",
+      data: {
+        labels: yearly.map(function (y) { return y.year; }),
+        datasets: [{
+          data: yearly.map(function (y) { return y.pnl; }),
+          backgroundColor: yearly.map(function (y) { return y.pnl >= 0 ? green : red; }),
+          barPercentage: 0.55,
+          categoryPercentage: 0.8
+        }]
+      },
+      options: {
+        animation: reduced ? false : { duration: 500 },
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            displayColors: false,
+            callbacks: {
+              label: function (ctx) {
+                var v = ctx.parsed.y;
+                return (v >= 0 ? "+" : "−") + "₹" +
+                  Math.abs(Math.round(v)).toLocaleString("en-IN");
+              }
+            }
+          }
+        },
+        scales: {
+          x: { grid: { display: false }, border: { color: ink } },
+          y: {
+            grid: { color: rule, drawTicks: false },
+            border: { display: false },
+            ticks: {
+              maxTicksLimit: 4,
+              callback: function (v) { return "₹" + Math.round(v / 1000) + "k"; }
+            }
+          }
+        }
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}

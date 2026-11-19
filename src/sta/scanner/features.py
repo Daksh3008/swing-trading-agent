@@ -59,7 +59,7 @@ def rma(close: pd.Series, length: int) -> pd.Series:
 RMA_LENGTHS = (15, 20, 25, 30, 40, 50, 60, 75, 90, 120, 150, 180, 200)
 
 
-def trend_features(hist: pd.DataFrame) -> pd.DataFrame:
+def trend_features(hist: pd.DataFrame, *, include_alt_gates: bool = True) -> pd.DataFrame:
     """MA structure: price above rising short MA, which is above rising long MA.
 
     Also exposes MA slope rates and their difference (acceleration):
@@ -73,30 +73,28 @@ def trend_features(hist: pd.DataFrame) -> pd.DataFrame:
     long_up = long_ma > long_ma.shift(_VOL_WINDOW)
     slope_50 = short_ma / short_ma.shift(_SLOPE_WINDOW) - 1.0
     slope_150 = long_ma / long_ma.shift(_SLOPE_WINDOW) - 1.0
-    # KAMA-based trend gate (Variant A) — same shape as the SMA gate
-    kama_fast = kama(hist["close"], length=10, fast=2, slow=30)
-    kama_slow = kama(hist["close"], length=30, fast=2, slow=30)
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "short_ma": short_ma,
         "long_ma": long_ma,
         "slope_50": slope_50,
         "slope_150": slope_150,
         "accel": slope_50 - slope_150,
         "trend_ok": (hist["close"] > short_ma) & short_up & (short_ma > long_ma) & long_up,
-        "trend_ok_kama": ((hist["close"] > kama_fast)
-                          & (kama_fast > kama_fast.shift(_SLOPE_WINDOW))
-                          & (kama_fast > kama_slow)
-                          & (kama_slow > kama_slow.shift(_SLOPE_WINDOW))),
-        **{
-            name: series
-            for n in RMA_LENGTHS
-            for name, series in (
-                (f"rma_{n}", rma(hist["close"], n)),
-                (f"rma_{n}_up", rma(hist["close"], n)
-                 > rma(hist["close"], n).shift(_SLOPE_WINDOW)),
-            )
-        },
     })
+    if not include_alt_gates:
+        return out
+    # KAMA-based trend gate (Variant A) — same shape as the SMA gate
+    kama_fast = kama(hist["close"], length=10, fast=2, slow=30)
+    kama_slow = kama(hist["close"], length=30, fast=2, slow=30)
+    out["trend_ok_kama"] = ((hist["close"] > kama_fast)
+                            & (kama_fast > kama_fast.shift(_SLOPE_WINDOW))
+                            & (kama_fast > kama_slow)
+                            & (kama_slow > kama_slow.shift(_SLOPE_WINDOW)))
+    for n in RMA_LENGTHS:
+        series = rma(hist["close"], n)
+        out[f"rma_{n}"] = series
+        out[f"rma_{n}_up"] = series > series.shift(_SLOPE_WINDOW)
+    return out
 
 
 def momentum_features(hist: pd.DataFrame) -> pd.DataFrame:
@@ -113,11 +111,18 @@ def momentum_features(hist: pd.DataFrame) -> pd.DataFrame:
     })
 
 
-def compute_features(hist: pd.DataFrame) -> pd.DataFrame:
-    """All per-symbol features joined on the symbol's own date index."""
+def compute_features(hist: pd.DataFrame, *, include_alt_gates: bool = True) -> pd.DataFrame:
+    """All per-symbol features joined on the symbol's own date index.
+
+    ``include_alt_gates=False`` skips the KAMA/RMA columns (they are only used
+    by the ``kama``/``rma`` scanner variants). A one-day live scan uses this:
+    the exponential averages depend on full history and are useless for a
+    single-day readout, and they dominate the compute cost.
+    """
     if hist.empty:
         return pd.DataFrame()
-    feats = trend_features(hist).join(momentum_features(hist), how="outer")
+    feats = trend_features(hist, include_alt_gates=include_alt_gates).join(
+        momentum_features(hist), how="outer")
     feats["exchange"] = hist["exchange"].iloc[0]
     feats["isin"] = hist["isin"].iloc[0]
     return feats

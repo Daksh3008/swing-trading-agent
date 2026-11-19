@@ -2,10 +2,9 @@ from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
-import pytest
 
-from sta.scanner.momentum import MomentumScanner, ScannerParams
 from sta.scanner.features import compute_features
+from sta.scanner.momentum import MomentumScanner
 
 
 def _history(symbol, exchange, days=300, drift=0.0, breakout=True,

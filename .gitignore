@@ -7,3 +7,7 @@ __pycache__/
 
 # data (regenerable via `python -m sta download/compile/universe`)
 data/
+.txt
+.agents
+skills-lock.json
+tasks.md

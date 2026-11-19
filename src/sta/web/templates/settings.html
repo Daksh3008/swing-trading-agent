@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block heading %}Settings{% endblock %}
+{% block lede %}Sizing and slot rules for paper trades. Price-stop logic is fixed to the
+validated trailing variant and is not configurable here.{% endblock %}
+
+{% block content %}
+{% if saved %}
+<div class="flash" role="status">Settings saved. New suggestions use them immediately;
+  open positions keep the size they were filled at.</div>
+{% endif %}
+
+<section aria-labelledby="live-h">
+  <div class="sectionbar">
+    <h2 id="live-h">Paper trading</h2>
+  </div>
+  <form class="form" method="post" action="/settings">
+    <div class="field">
+      <label for="position_size">Position size (₹ per slot)</label>
+      <input id="position_size" name="position_size" type="number" step="500"
+             min="1000" max="10000000" value="{{ live.position_size | int }}" required>
+      <p class="hint">Whole shares are bought; the remainder stays in cash.</p>
+    </div>
+    <div class="field">
+      <label for="max_positions">Concurrent slots</label>
+      <input id="max_positions" name="max_positions" type="number" min="1" max="20"
+             value="{{ live.max_positions }}" required>
+      <p class="hint">Total book value is position size × slots.</p>
+    </div>
+    <div class="field">
+      <label for="scan_top_n">Suggestions per session</label>
+      <input id="scan_top_n" name="scan_top_n" type="number" min="1" max="50"
+             value="{{ live.scan_top_n }}" required>
+      <p class="hint">The scanner ranks the whole universe, then keeps this many.</p>
+    </div>
+    <div class="field field--check">
+      <input id="auto_track" name="auto_track" type="checkbox"
+             {% if live.auto_track %}checked{% endif %}>
+      <label for="auto_track">Track every suggestion automatically</label>
+      <p class="hint">When off, each suggestion waits for a Track click on Today.</p>
+    </div>
+    <div class="form__actions">
+      <button class="btn btn--primary" type="submit">Save settings</button>
+    </div>
+  </form>
+</section>
+
+<section class="block" aria-labelledby="fixed-h">
+  <div class="sectionbar">
+    <h2 id="fixed-h">Fixed rules</h2>
+  </div>
+  <dl class="facts">
+    <div><dt>Initial stop</dt><dd>{{ live.stop_pct | pct(0, False) }} below the fill</dd></div>
+    <div><dt>Trailing stop</dt><dd>{{ live.trailing_atr_mult }}× ATR({{ live.atr_window }}), ratcheted</dd></div>
+    <div><dt>Profit lock</dt><dd>+5% floor once a trade runs past +10%</dd></div>
+    <div><dt>Time stop</dt><dd>40 sessions, only when the trade is not in profit</dd></div>
+    <div><dt>Same-day re-entry</dt><dd>Blocked for a symbol that exited that session</dd></div>
+    <div><dt>Costs</dt><dd>STT, stamp duty, exchange and SEBI charges, ₹20 per order</dd></div>
+  </dl>
+</section>
+
+<section class="block" aria-labelledby="sched-h">
+  <div class="sectionbar">
+    <h2 id="sched-h">Schedule</h2>
+  </div>
+  <dl class="facts">
+    <div><dt>Daily run</dt><dd>{{ schedule.time }} {{ schedule.timezone }}</dd></div>
+    <div><dt>Catch-up</dt><dd>At logon, if the cache is behind</dd></div>
+    <div><dt>Startup check</dt><dd>{{ "Disabled" if auto_sync_disabled else "Enabled" }}</dd></div>
+    <div><dt>Workspace</dt><dd class="mono">{{ root }}</dd></div>
+  </dl>
+  <p class="note">Enable or remove the scheduled tasks with the commands in the README.
+    The app never registers them itself.</p>
+</section>
+{% endblock %}

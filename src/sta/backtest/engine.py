@@ -24,18 +24,30 @@ Execution model (deliberately conservative, no look-ahead):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date as Date
-from enum import Enum
 
 import numpy as np
 import pandas as pd
 
-from ..core.models import Exchange, ScanCandidate
+from ..core.models import ScanCandidate
+from ..live.rules import (
+    ExitReason,
+    PositionView,
+    RuleParams,
+    atr_series,
+    exit_signal,
+    initial_stop,
+    initial_target,
+    shares_for,
+    update_trailing_stop,
+)
 from ..scanner.momentum import Scanner
 from .costs import CostModel
 
 log = logging.getLogger(__name__)
+
+__all__ = ["BacktestEngine", "BacktestResult", "ExitReason", "StrategyParams", "Trade"]
 
 
 @dataclass(frozen=True)
@@ -61,17 +73,25 @@ class StrategyParams:
     # trend exit (close below rolling MA)
     ma_exit_window: int | None = None
 
-
-class ExitReason(str, Enum):
-    STOP = "stop_initial"                  # initial -stop_pct stop
-    STOP_TRAILING = "stop_trailing"        # chandelier ratchet
-    STOP_PROFIT_LOCK = "stop_profit_lock"  # +5% floor after a >10% run
-    STOP_FAILED_BREAKOUT = "stop_failed_breakout"  # gave back a >10% run
-    STOP_ATR_COLLAPSED = "stop_atr_collapsed"      # volatility compression
-    TARGET = "target"
-    TIME = "time"
-    TREND = "trend"
-    END = "end"
+    @property
+    def rules(self) -> RuleParams:
+        """The same knobs in the shared, I/O-free rules form."""
+        return RuleParams(
+            position_size=self.position_size,
+            max_positions=self.max_positions,
+            stop_pct=self.stop_pct,
+            target_pct=self.target_pct,
+            max_hold_days=self.max_hold_days,
+            limit_band=self.limit_band,
+            trailing=self.trailing,
+            trailing_atr_mult=self.trailing_atr_mult,
+            atr_window=self.atr_window,
+            profit_lock_at=self.profit_lock_at,
+            profit_floor=self.profit_floor,
+            profit_lock_release=self.profit_lock_release,
+            let_winners_run=self.let_winners_run,
+            ma_exit_window=self.ma_exit_window,
+        )
 
 
 @dataclass
@@ -162,18 +182,15 @@ class BacktestEngine:
         self.bars = bars
         self.days = [pd.Timestamp(d) for d in sorted(trading_days)]
         self.params = params or StrategyParams()
+        self.rules = self.params.rules
         self.costs = costs or CostModel()
         self._atr: dict[str, pd.Series] = {}
         self._exit_ma: dict[str, pd.Series] = {}
+        self._exited_today: set[str] = set()
         if self.params.trailing:
-            w = self.params.atr_window
             for sym, df in bars.items():
-                prev = df["close"].shift(1)
-                tr = np.maximum(
-                    df["high"] - df["low"],
-                    np.maximum((df["high"] - prev).abs(), (df["low"] - prev).abs()))
                 # shift(1): the stop for day D uses ATR through day D-1 only
-                self._atr[sym] = tr.ewm(alpha=1.0 / w, adjust=False).mean().shift(1)
+                self._atr[sym] = atr_series(df, self.params.atr_window)
         if self.params.ma_exit_window:
             for sym, df in bars.items():
                 self._exit_ma[sym] = df["close"].rolling(
@@ -189,6 +206,7 @@ class BacktestEngine:
         exposure: list[float] = []
 
         for i, day in enumerate(self.days):
+            self._exited_today = set()
             cash, open_positions, trades = self._process_day(
                 day, cash, open_positions, trades)
 
@@ -210,7 +228,6 @@ class BacktestEngine:
     # ------------------------------------------------------------- internals
 
     def _process_day(self, day, cash, positions, trades):
-        p = self.params
         for symbol in list(positions):
             pos = positions[symbol]
             hist = self.bars.get(pos.trade.symbol)
@@ -226,20 +243,17 @@ class BacktestEngine:
 
             # Ratchet the stop using ONLY information from before today's bar:
             # high-water through yesterday and ATR through yesterday.
-            if p.trailing:
-                candidate = -np.inf
-                if np.isfinite(atr_prev):
-                    candidate = pos.high_water - p.trailing_atr_mult * atr_prev
-                max_profit = (pos.high_water / entry - 1.0) if entry > 0 else 0.0
-                if max_profit > p.profit_lock_at:
-                    if max_profit > p.profit_lock_release:
-                        candidate = candidate  # chandelier governs above 14%
-                    else:
-                        candidate = max(candidate, entry * (1.0 + p.profit_floor))
-                pos.stop_live = max(pos.stop_live, float(candidate))
+            pos.stop_live = update_trailing_stop(
+                entry_price=entry, high_water=pos.high_water,
+                stop_live=pos.stop_live, atr_prev=atr_prev, params=self.rules)
 
-            exit = self._exit_price(pos, bar, day, p, atr_prev=atr_prev,
-                                    ma=self._exit_ma.get(pos.trade.symbol))
+            view = PositionView(
+                entry_price=entry, stop_initial=pos.trade.stop,
+                stop_live=pos.stop_live, target=pos.trade.target,
+                high_water=pos.high_water, bars_held=pos.bars_held)
+            exit = exit_signal(
+                view, bar, self.rules, atr_prev=atr_prev,
+                ma_value=self._series_at(self._exit_ma.get(pos.trade.symbol), day))
             if exit is not None:
                 price, reason = exit
                 value = price * pos.trade.shares
@@ -254,6 +268,7 @@ class BacktestEngine:
                 pos.trade.atr_at_exit = atr_prev if np.isfinite(atr_prev) else 0.0
                 cash += value - cost
                 del positions[symbol]
+                self._exited_today.add(_trade_key(pos.trade))
             else:
                 # end of session: fold today's high into the high-water mark
                 pos.high_water = max(pos.high_water, float(bar["high"]))
@@ -268,66 +283,21 @@ class BacktestEngine:
         except KeyError:
             return float("nan")
 
-    @staticmethod
-    def _classify_stop(pos: OpenPosition, exit_price: float,
-                       atr_prev: float, bar) -> ExitReason:
-        entry = pos.trade.entry_price
-        if exit_price >= entry * 1.02:
-            return ExitReason.STOP_PROFIT_LOCK
-        if pos.high_water >= entry * 1.10:
-            return ExitReason.STOP_FAILED_BREAKOUT
-        rng = (float(bar["high"]) - float(bar["low"])) / max(float(bar["close"]), 1e-9)
-        if ((np.isfinite(atr_prev) and entry > 0 and atr_prev / entry < 0.005)
-                or rng < 0.002):
-            return ExitReason.STOP_ATR_COLLAPSED
-        if pos.stop_live <= entry * (1.0 - 0.10) * 1.001:
-            return ExitReason.STOP
-        return ExitReason.STOP_TRAILING
-
-    @classmethod
-    def _exit_price(cls, pos: OpenPosition, bar, day, p,
-                    atr_prev: float = float("nan"),
-                    ma: pd.Series | None = None):
-        stop = pos.stop_live if pos.stop_live else pos.trade.stop
-        target = pos.trade.target
-        o, h, l = bar["open"], bar["high"], bar["low"]
-        # limit-down freeze: sellers cannot exit at lower circuit
-        prev_close = bar.get("prev_close")
-        frozen = (np.isfinite(prev_close)
-                  and bar["low"] <= prev_close * (1 - p.limit_band) * 1.01
-                  and abs(bar["close"] - prev_close * (1 - p.limit_band))
-                  < 0.01 * prev_close)
-        if not frozen:
-            if o <= stop:                       # gap through the stop
-                return o, cls._classify_stop(pos, float(o), atr_prev, bar)
-            if l <= stop:
-                return stop, cls._classify_stop(pos, float(stop), atr_prev, bar)
-            if p.ma_exit_window:
-                ma_val = cls._series_at(ma, day)
-                if np.isfinite(ma_val) and bar["close"] < ma_val:
-                    return bar["close"], ExitReason.TREND
-            if not p.trailing and h >= target:
-                return max(o, min(target, h)), ExitReason.TARGET  # gap up or touch
-        if pos.bars_held >= p.max_hold_days:
-            # winners run: hold a position that is still in profit
-            if p.let_winners_run and float(bar["close"]) > pos.trade.entry_price:
-                return None
-            return bar["close"], ExitReason.TIME
-        return None
-
     def _try_entries(self, day, signal_day, cash, positions, trades):
         p = self.params
         if len(positions) >= p.max_positions or cash < p.position_size * 0.98:
             return cash, positions, trades
         for cand in self.scanner.scan(signal_day):
             key = _key(cand)
-            if key in positions or len(positions) >= p.max_positions:
+            if key in positions or key in self._exited_today:
+                continue
+            if len(positions) >= p.max_positions:
                 continue
             hist = self.bars.get(cand.symbol)
             bar = self._bar(hist, day)
             if bar is None or not np.isfinite(bar["open"]):
                 continue
-            shares = int(p.position_size // bar["open"])
+            shares = shares_for(p.position_size, float(bar["open"]))
             if shares <= 0:
                 continue
             value = shares * bar["open"]
@@ -337,8 +307,8 @@ class BacktestEngine:
             trade = Trade(
                 symbol=cand.symbol, exchange=cand.exchange, entry_date=day,
                 entry_price=bar["open"], shares=shares,
-                stop=bar["open"] * (1 - p.stop_pct),
-                target=bar["open"] * (1 + p.target_pct),
+                stop=initial_stop(bar["open"], p.stop_pct),
+                target=initial_target(bar["open"], p.target_pct),
                 entry_cost=cost)
             positions[key] = OpenPosition(
                 trade=trade,
@@ -371,3 +341,7 @@ class BacktestEngine:
 
 def _key(cand: ScanCandidate) -> str:
     return f"{cand.exchange}:{cand.symbol}"
+
+
+def _trade_key(trade: Trade) -> str:
+    return f"{trade.exchange}:{trade.symbol}"

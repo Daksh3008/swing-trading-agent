@@ -57,11 +57,97 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--rma-slow", type=int, default=75,
                     help="slow RMA length for --variant rma/trailing_rma")
 
+    sy = sub.add_parser("sync", parents=[common],
+                        help="incremental data refresh (parquet cache + app.db)")
+    sy.add_argument("--full", action="store_true",
+                    help="refetch every symbol from 1991 (slow, use after a gap)")
+    sy.add_argument("--workers", type=int, default=None, help="batch workers")
+    sy.add_argument("--limit", type=int, default=None, help="cap symbols (test)")
+    sy.add_argument("--catch-up", action="store_true",
+                    help="skip when the last successful sync already covered today")
+
+    sc = sub.add_parser("scan", parents=[common],
+                        help="scan the latest session for trade suggestions")
+    sc.add_argument("--day", default=None, help="YYYY-MM-DD (default: latest)")
+    sc.add_argument("--top", type=int, default=None, help="suggestions to keep")
+    sc.add_argument("--commit", action="store_true",
+                    help="persist suggestions (otherwise preview only)")
+
+    tr = sub.add_parser("track", parents=[common],
+                        help="advance the paper-trade tracker")
+    tr.add_argument("--day", default=None, help="YYYY-MM-DD (default: latest)")
+    tr.add_argument("--catch-up", action="store_true",
+                    help="replay every missed session in order")
+
+    web = sub.add_parser("web", parents=[common], help="serve the local app")
+    web.add_argument("--port", type=int, default=8000)
+    web.add_argument("--host", default="127.0.0.1")
+
+    sub.add_parser("backup", parents=[common],
+                   help="copy data/app.db into data/backups/ (keeps 14)")
+
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)
 
     settings = load_settings(Path(args.config) if args.config else None)
     settings.ensure_dirs()
+    from .live.ops import setup_file_logging
+    setup_file_logging(settings)
+
+    if args.command == "backup":
+        from .live.ops import backup_db
+        target = backup_db(settings)
+        print(f"backup: {target or 'nothing to back up'}")
+        return 0
+
+    if args.command in ("sync", "scan", "track"):
+        from .live.db import Database
+        db = Database(settings.db_path).init()
+
+    if args.command == "sync":
+        from .data.sync import DataSync
+        from .live.ops import check_sync_health
+        result = DataSync(settings, db,
+                          workers=args.workers or settings.download.workers)
+        outcome = result.run(full=args.full, limit=args.limit,
+                             catch_up=args.catch_up)
+        check_sync_health(settings, outcome)
+        print(json.dumps(outcome.as_dict(), indent=2, default=str))
+        return 0 if outcome.status in ("ok", "skipped") else 1
+
+    if args.command == "scan":
+        from .live.settings import load_live_settings
+        from .live.signals import run_scan
+        outcome = run_scan(settings, db, load_live_settings(settings, db),
+                           day=args.day, top_n=args.top, commit=args.commit)
+        if args.commit:
+            print(json.dumps(outcome.as_dict(), indent=2, default=str))
+        else:
+            for row in outcome.candidates:
+                print(f"{row['symbol']:<14} {row['score']:.3f} "
+                      f"close {row['close']:>9.2f}  qty {row['qty']:>4}  "
+                      f"stop {row['stop_initial']:>8.2f}  {row['cap_class']}")
+            print(json.dumps(outcome.as_dict(), indent=2, default=str))
+        return 0
+
+    if args.command == "track":
+        from .live.tracker import Tracker
+        tracker = Tracker(settings, db)
+        if args.catch_up:
+            for day in tracker.catch_up(args.day):
+                print(json.dumps(day.as_dict(), default=str))
+        else:
+            day = args.day or db.get_state("sync.last_day") or db.last_day()
+            if day is None:
+                parser.error("no trading day known — run `python -m sta sync` first")
+            print(json.dumps(tracker.update_day(day).as_dict(), default=str))
+        return 0
+
+    if args.command == "web":
+        from .web.app import serve
+        serve(settings, host=args.host, port=args.port)
+        return 0
+
     pipeline = DataPipeline(settings)
 
     if args.command == "universe":

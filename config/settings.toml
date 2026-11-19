@@ -12,3 +12,18 @@ tickers_file = "config/Equity.csv"  # BSE ticker list (reference project)
 max_mcap_cr = 50000.0               # keep stocks at or below this market cap
 small_upper_cr = 25000.0            # small-cap band: 5000-25000 cr
 micro_upper_cr = 5000.0             # micro-cap band: below 5000 cr
+
+[live]
+position_size = 15000.0   # rupees per slot
+max_positions = 5         # concurrent paper positions (validated runs used 4)
+auto_track = true         # every suggestion enters the queue automatically
+scan_top_n = 10           # suggestions stored per session
+scan_tail_bars = 400      # bars per symbol loaded for a one-day scan
+stop_pct = 0.10
+target_pct = 0.30
+trailing_atr_mult = 3.0
+atr_window = 22
+
+[schedule]
+time = "18:30"
+timezone = "Asia/Kolkata"

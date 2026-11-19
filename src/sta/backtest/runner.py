@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date as Date, datetime
+from datetime import date as Date
+from datetime import datetime
 
 import pandas as pd
 
@@ -16,6 +17,7 @@ from ..backtest.costs import CostModel
 from ..backtest.engine import BacktestEngine, StrategyParams
 from ..core.config import Settings
 from ..data.store import ParquetBarStore
+from ..data.universe import membership_spans
 from ..scanner.momentum import MomentumScanner, ScannerParams
 
 log = logging.getLogger(__name__)
@@ -23,22 +25,8 @@ log = logging.getLogger(__name__)
 
 def _membership_spans(store: ParquetBarStore, membership: pd.DataFrame,
                       histories: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Synthesize scanner spans (symbol, exchange, isin, start, end)."""
-    if {"start", "end"}.issubset(membership.columns):
-        return membership
-    rows = []
-    for sym in membership["symbol"].astype(str):
-        hist = histories.get(sym)
-        if hist is None or hist.empty:
-            continue
-        rows.append({
-            "symbol": sym,
-            "exchange": str(hist["exchange"].iloc[0]) if "exchange" in hist else "BSE",
-            "isin": "",
-            "start": hist.index[0].date(),
-            "end": hist.index[-1].date(),
-        })
-    return pd.DataFrame(rows)
+    """Backwards-compatible alias for :func:`membership_spans`."""
+    return membership_spans(membership, histories)
 
 
 def run_backtest(settings: Settings, start: str, end: str,

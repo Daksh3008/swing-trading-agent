@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Tracker{% endblock %}
+{% block heading %}Tracker{% endblock %}
+{% block lede %}Open paper positions are marked at each close. A stop ratchets from the
+previous session's high-water mark and average true range, never backwards.{% endblock %}
+
+{% block content %}
+<section aria-labelledby="open-h">
+  <div class="sectionbar">
+    <h2 id="open-h">Open positions</h2>
+    <span class="count">{{ open_rows | length }} of {{ slots_max }} slots</span>
+  </div>
+  {% if open_rows %}
+  <div class="table-wrap">
+    <table class="grid">
+      <caption class="visually-hidden">Open paper positions marked at the latest close</caption>
+      <thead>
+        <tr>
+          <th scope="col">Symbol</th>
+          <th scope="col">Entered</th>
+          <th scope="col" class="num">Entry</th>
+          <th scope="col" class="num">Shares</th>
+          <th scope="col" class="num">Last</th>
+          <th scope="col" class="num">P&amp;L</th>
+          <th scope="col" class="num">Stop live</th>
+          <th scope="col" class="num">To stop</th>
+          <th scope="col" class="num">High water</th>
+          <th scope="col" class="num">Days</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in open_rows %}
+        <tr>
+          <td><span class="sym">{{ row.symbol | replace(".BO", "") }}</span></td>
+          <td>{{ row.entry_date_label }}</td>
+          <td class="num">{{ row.entry_price | money(2) }}</td>
+          <td class="num">{{ row.shares }}</td>
+          <td class="num">{{ row.last | money(2) }}</td>
+          <td class="num {{ row.unrealized | tone }}">{{ row.unrealized | money(0) }}
+            <span class="cell-sub">{{ row.unrealized_pct | pct }}</span></td>
+          <td class="num">{{ row.stop_live | money(2) }}</td>
+          <td class="num">{{ row.distance_to_stop | pct(1) }}</td>
+          <td class="num">{{ row.high_water | money(2) }}</td>
+          <td class="num">{{ row.days_held }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <p>No open positions.</p>
+    <p class="empty__hint">Track a suggestion on Today and it fills at the next session's open.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section aria-labelledby="closed-h" class="block">
+  <div class="sectionbar">
+    <h2 id="closed-h">Closed trades</h2>
+    <span class="count">{{ stats.trades }} trade{{ "" if stats.trades == 1 else "s" }}</span>
+  </div>
+
+  <dl class="statrow">
+    <div><dt>Win rate</dt><dd>{{ stats.win_rate | pct(1, False) }}</dd></div>
+    <div><dt>Profit factor</dt><dd>{{ "%.2f" | format(stats.profit_factor) if stats.profit_factor else "—" }}</dd></div>
+    <div><dt>Expectancy</dt><dd>{{ stats.expectancy | money(0) }}</dd></div>
+    <div><dt>Average hold</dt><dd>{{ "%.0f" | format(stats.avg_hold) if stats.avg_hold else "—" }} days</dd></div>
+    <div><dt>Net P&amp;L</dt><dd class="{{ stats.total_pnl | tone }}">{{ stats.total_pnl | money(0) }}</dd></div>
+  </dl>
+
+  <form class="filters" method="get" action="/tracker">
+    <label>Year
+      <select name="year">
+        <option value="">All</option>
+        {% for y in years %}<option value="{{ y }}" {% if filters.year == y %}selected{% endif %}>{{ y }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Exit reason
+      <select name="reason">
+        <option value="">All</option>
+        {% for r in reasons %}<option value="{{ r }}" {% if filters.reason == r %}selected{% endif %}>{{ r | reason }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Result
+      <select name="result">
+        <option value="">All</option>
+        <option value="win" {% if filters.result == "win" %}selected{% endif %}>Winners</option>
+        <option value="loss" {% if filters.result == "loss" %}selected{% endif %}>Losers</option>
+      </select>
+    </label>
+    <button class="btn btn--small" type="submit">Apply</button>
+    <a class="btn btn--small btn--ghost" href="/export/closed.csv">Download CSV</a>
+  </form>
+
+  {% if closed %}
+  <div class="table-wrap">
+    <table class="grid">
+      <caption class="visually-hidden">Closed paper trades</caption>
+      <thead>
+        <tr>
+          <th scope="col">Exited</th>
+          <th scope="col">Symbol</th>
+          <th scope="col" class="num">Entry</th>
+          <th scope="col" class="num">Exit</th>
+          <th scope="col" class="num">Return</th>
+          <th scope="col" class="num">P&amp;L</th>
+          <th scope="col" class="num">Days</th>
+          <th scope="col">Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in closed %}
+        <tr>
+          <td>{{ row.exit_date_label }}</td>
+          <td><span class="sym">{{ row.symbol | replace(".BO", "") }}</span></td>
+          <td class="num">{{ row.entry_price | money(2) }}</td>
+          <td class="num">{{ row.exit_price | money(2) }}</td>
+          <td class="num {{ row.return_pct | tone }}">{{ row.return_pct | pct }}</td>
+          <td class="num {{ row.pnl | tone }}">{{ row.pnl | money(0) }}</td>
+          <td class="num">{{ row.days_held }}</td>
+          <td><span class="reason">{{ row.reason_label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <p>No closed trades match these filters.</p>
+    <p class="empty__hint">Clear the filters to see every trade the tracker has closed.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
