@@ -148,9 +148,10 @@ def freshness(settings: Settings, db: Database) -> dict:
     universe_day = db.universe_day()
     files = len(list(settings.daily_dir.glob("*.parquet"))) if settings.daily_dir.exists() else 0
     status = "missing" if session is None else ("fresh" if behind <= 0 else "stale")
-    # a single symbol at the new session does not make the cache current
+    # a session only a minority reached is not the session (the sync enforces
+    # the same 50% floor before writing coverage)
     if (status == "fresh" and coverage.get("day") == expected.isoformat()
-            and coverage.get("pct", 100) < 80):
+            and coverage.get("pct", 100) < 50):
         status = "stale"
     source_lag = False
     if status == "stale" and behind > 0 and attempted_since(db, expected):

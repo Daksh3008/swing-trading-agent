@@ -262,20 +262,39 @@ def test_attempted_since_ignores_failed_tiny_or_broken_runs():
 
 
 def test_catch_up_skips_after_a_verified_source_lag(tmp_path):
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
+    from sta.core.market_calendar import session_cutoff
     from sta.data.sync import expected_session
     from sta.live.db import Database
 
     settings = _settings(tmp_path)
     db = Database(":memory:").init()
-    db.set_state("sync.last_day",
-                 (expected_session() - timedelta(days=1)).isoformat())
-    _log(db, datetime.now().isoformat(timespec="seconds"), status="partial")
+    expected = expected_session()
+    db.set_state("sync.last_day", (expected - timedelta(days=1)).isoformat())
+    published = session_cutoff(expected).replace(hour=20).isoformat(timespec="seconds")
+    _log(db, published, status="partial")
 
     result = DataSync(settings, db).run(catch_up=True)
 
     assert result.status == "skipped"
+
+
+def test_limit_run_never_advances_the_sync_cursor(tmp_path):
+    settings = _settings(tmp_path)
+    for sym in ("AAA.BO", "BBB.BO"):
+        _seed(settings, sym)
+    feed = FakeFeed({sym: _frame(DATES, [100.0 + i for i in range(len(DATES))])
+                     for sym in ("AAA.BO", "BBB.BO")})
+    from sta.live.db import Database
+
+    db = Database(":memory:").init()
+
+    result = _sync(settings, feed, db=db).run(limit=1)
+
+    assert result.status == "ok"
+    assert db.get_state("sync.last_day") is None
+    assert db.get_json("sync.coverage") is None
 
 
 def test_catch_up_skips_when_the_cache_already_has_the_session(tmp_path):

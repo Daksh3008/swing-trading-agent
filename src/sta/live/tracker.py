@@ -295,16 +295,22 @@ class Tracker:
         if not trusted:
             return {"changed": False, "cursor": None, "trusted": None}
         rolled = self._rollback_entries_after(trusted)
+        reopened = self._reopen_exits_after(trusted)
         cursor = self.db.get_state(CURSOR_KEY)
-        changed = rolled > 0
+        changed = rolled > 0 or reopened > 0
         equity_rows = mark_rows = 0
-        repaired = 0
         if cursor and cursor > trusted:
             with self.db.connect() as conn:
                 equity_rows = conn.execute(
                     "DELETE FROM equity WHERE day > ?", (trusted,)).rowcount
                 mark_rows = conn.execute(
                     "DELETE FROM marks WHERE date > ?", (trusted,)).rowcount
+            self.db.set_state(CURSOR_KEY, trusted)
+            changed = True
+        repaired = 0
+        if changed:
+            # Any open position (including one reopened above) gets its held
+            # count rebuilt from the calendar, never incremented twice.
             sessions = self.db.trading_days(end=trusted)
             for row in self.db.open_trades():
                 entry = str(row["entry_date"] or "")[:10]
@@ -314,16 +320,16 @@ class Tracker:
                 if held != int(row["days_held"] or 0):
                     self.db.update_trade(row["id"], days_held=held)
                     repaired += 1
-            self.db.set_state(CURSOR_KEY, trusted)
-            changed = True
         if not changed:
             return {"changed": False, "cursor": cursor, "trusted": trusted}
         log.warning("tracker reconciled: cursor %s -> %s, rolled back %d entry/entries, "
-                    "dropped %d equity and %d mark rows, fixed %d day counters",
-                    cursor, trusted, rolled, equity_rows, mark_rows, repaired)
+                    "reopened %d exit(s), dropped %d equity and %d mark rows, "
+                    "fixed %d day counters",
+                    cursor, trusted, rolled, reopened, equity_rows, mark_rows, repaired)
         return {"changed": True, "cursor": trusted, "trusted": trusted,
-                "entries_rolled_back": rolled, "equity_rows": equity_rows,
-                "mark_rows": mark_rows, "days_fixed": repaired}
+                "entries_rolled_back": rolled, "exits_reopened": reopened,
+                "equity_rows": equity_rows, "mark_rows": mark_rows,
+                "days_fixed": repaired}
 
     def _rollback_entries_after(self, trusted: str) -> int:
         """Return positions opened after the trusted session to the queue."""
@@ -348,6 +354,27 @@ class Tracker:
                         rolled, trusted)
         return rolled
 
+    def _reopen_exits_after(self, trusted: str) -> int:
+        """Reopen positions closed on a session the cache no longer supports."""
+        reopened = 0
+        cash = float(self.db.get_state(
+            CASH_KEY, self.live.position_size * self.live.max_positions))
+        for row in self.db.closed_trades():
+            exit_date = str(row["exit_date"] or "")[:10]
+            if not exit_date or exit_date <= trusted:
+                continue
+            proceeds = (float(row["exit_price"] or 0.0) * int(row["shares"] or 0)
+                        - float(row["exit_cost"] or 0.0))
+            cash -= proceeds
+            self.db.update_trade(
+                row["id"], status="open", exit_date=None, exit_price=None,
+                exit_cost=0.0, exit_reason=None, pnl=None)
+            reopened += 1
+        if reopened:
+            self.db.set_state(CASH_KEY, cash)
+            log.warning("tracker: reopened %d exit(s) after %s", reopened, trusted)
+        return reopened
+
     # -------------------------------------------------------------- internals
 
     def _check_health(self, day: Date) -> None:
@@ -366,7 +393,7 @@ class Tracker:
         not spray one notification per historical exit.
         """
         try:
-            latest = self.db.last_day()
+            latest = self.db.trusted_day() or self.db.last_day()
             if latest and str(day) != str(latest):
                 return
             from .ops import alert

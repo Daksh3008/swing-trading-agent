@@ -26,6 +26,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..core.market_calendar import IST
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,7 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_marks_trade   ON marks (trade_id);
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(IST).isoformat(timespec="seconds")
 
 
 def _iso(value: Date | str | None) -> str | None:
@@ -419,21 +421,24 @@ class Database:
         coverage = self.get_json("sync.coverage", {}) or {}
         if coverage.get("day") and int(coverage.get("pct", 0)) >= 50:
             return str(coverage["day"])[:10]
-        # No usable coverage record: derive the newest day at least half the
-        # synced symbols reached. A lone early print must not qualify.
+        # No usable coverage record: derive the newest day at least half of the
+        # *universe* reached. The denominator is the cached universe, not the
+        # handful of rows a partial sync wrote, so one early print cannot win.
+        daily = Path(self.path).parent / "daily"
+        universe = sum(1 for _ in daily.glob("*.parquet")) if daily.exists() else 0
         with self.connect() as conn:
-            total = conn.execute("SELECT COUNT(*) AS n FROM sync_state").fetchone()["n"]
-            if total:
-                row = conn.execute(
-                    """SELECT last_date, COUNT(*) AS n FROM sync_state
-                       WHERE last_date IS NOT NULL
-                       GROUP BY last_date
-                       HAVING n >= ?
-                       ORDER BY last_date DESC LIMIT 1""",
-                    (max(1, total / 2.0),)).fetchone()
-                if row and row["last_date"]:
-                    return row["last_date"]
-        return self.last_day()
+            synced = conn.execute(
+                "SELECT COUNT(last_date) AS n FROM sync_state").fetchone()["n"]
+            if not synced:
+                return None
+            row = conn.execute(
+                """SELECT last_date, COUNT(*) AS n FROM sync_state
+                   WHERE last_date IS NOT NULL
+                   GROUP BY last_date
+                   HAVING n >= ?
+                   ORDER BY last_date DESC LIMIT 1""",
+                (max(1, max(synced, universe) / 2.0),)).fetchone()
+            return row["last_date"] if row else None
 
     # ------------------------------------------------------------ sync state
 

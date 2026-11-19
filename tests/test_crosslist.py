@@ -30,9 +30,10 @@ def _frame(dates, closes) -> pd.DataFrame:
     })
 
 
-def _seed(settings, symbol="AAA.BO", closes=None):
-    closes = closes or [100.0 + i for i in range(len(DATES))]
-    write_history_atomic(_frame(DATES, closes).set_index("Date"),
+def _seed(settings, symbol="AAA.BO", closes=None, dates=None):
+    dates = DATES if dates is None else dates
+    closes = closes or [100.0 + i for i in range(len(dates))]
+    write_history_atomic(_frame(dates, closes).set_index("Date"),
                          settings.daily_dir / f"{symbol}.parquet")
 
 
@@ -116,12 +117,10 @@ def test_symbols_already_current_are_skipped(tmp_path):
 
 def test_a_longer_gap_is_not_filled(tmp_path):
     settings = _settings(tmp_path)
-    _seed(settings)
-    db = Database(":memory:").init()
-    # the file stops three sessions before the target: a normal sync's job
-    db.set_sync_state("AAA.BO", (DATES[-1] - pd.Timedelta(days=5)).date(),
-                      bars=len(DATES) - 1)
     closes = [100.0 + i for i in range(len(DATES))]
+    _seed(settings, closes=closes[:7], dates=DATES[:7])   # ends three sessions early
+    db = Database(":memory:").init()
+    db.set_sync_state("AAA.BO", DATES[6].date(), bars=7)
     ns = _frame(list(DATES) + [GAP], closes + [closes[-1] + 1.0])
 
     result = fill_session_gap(settings, db, GAP, ["AAA.BO"],
@@ -130,7 +129,7 @@ def test_a_longer_gap_is_not_filled(tmp_path):
     assert result.candidates == 0
     assert result.filled == 0
     hist = read_history(settings.daily_dir / "AAA.BO.parquet")
-    assert hist.index[-1].date() == DATES[-1].date()
+    assert hist.index[-1].date() == DATES[6].date()
 
 
 def test_missing_listing_counts_as_missing(tmp_path):

@@ -132,11 +132,16 @@ def test_indian_number_and_percent_formatting():
 # ------------------------------------------------- source lag and marks (E4/E6)
 
 def test_source_lag_is_explained_instead_of_stale(client):
+    from sta.core.market_calendar import latest_closed_session, session_cutoff
+
     db = client.app.state.db
     db.set_json("sync.coverage", {"day": "2024-02-09", "at_session": 1,
                                   "total": 1, "pct": 100})
+    # deterministic: the attempt finished after the publish window for the
+    # expected session, whatever the wall clock says right now
+    published = session_cutoff(latest_closed_session()).replace(hour=20)
     log_id = db.start_sync_log()
-    db.finish_sync_log(log_id, finished_at=datetime.now().isoformat(timespec="seconds"),
+    db.finish_sync_log(log_id, finished_at=published.isoformat(timespec="seconds"),
                        symbols=100, failed=0, status="ok")
 
     page = client.get("/").text

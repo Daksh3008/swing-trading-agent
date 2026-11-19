@@ -40,6 +40,7 @@ import pandas as pd
 
 from ..core.config import Settings
 from ..core.market_calendar import (
+    IST,
     latest_closed_session,
     session_cutoff,
     sessions_behind,
@@ -220,7 +221,7 @@ def _latest_business_day(day: Date, now: datetime | None = None) -> Date:
 
 def expected_session(now: datetime | None = None) -> Date:
     """The newest *closed* trading session — never today's live bar."""
-    return latest_closed_session(now or datetime.now())
+    return latest_closed_session(now or datetime.now(IST))
 
 
 def expected_last_day(last_dates: Iterable[Date | None],
@@ -283,6 +284,7 @@ class SyncResult:
     gap_day: Date | None = None
     duration_s: float = 0.0
     status: str = "ok"
+    note: str | None = None
     errors: list[str] = field(default_factory=list)
     suspicious_dates: list[str] = field(default_factory=list)
 
@@ -296,6 +298,7 @@ class SyncResult:
             "gap_filled": self.gap_filled,
             "gap_day": self.gap_day.isoformat() if self.gap_day else None,
             "duration_s": round(self.duration_s, 1), "status": self.status,
+            "note": self.note,
             "errors": self.errors[:20], "suspicious_dates": self.suspicious_dates[:20],
         }
 
@@ -368,13 +371,14 @@ class DataSync:
             result.duration_s = time.time() - started
             if self.db and log_id:
                 self.db.finish_sync_log(
-                    log_id, finished_at=datetime.now().isoformat(timespec="seconds"),
+                    log_id, finished_at=datetime.now(IST).isoformat(timespec="seconds"),
                     duration_s=result.duration_s, symbols=result.symbols,
                     updated=result.updated, refreshed=result.refreshed,
                     failed=result.failed, suspicious=result.suspicious,
                     status=result.status,
                     note=f"stale={result.stale} expected={result.expected_day}")
-                if result.expected_day is not None:
+                if (self._coverage_allowed and result.expected_day is not None
+                        and result.status in ("ok", "partial")):
                     self.db.set_state("sync.last_day", result.expected_day)
         log.info("sync %s in %.1fs: %s", result.status, result.duration_s,
                  result.as_dict())
@@ -456,6 +460,11 @@ class DataSync:
         self._progress("finalising", len(symbols), len(symbols))
 
         if self.db:
+            if result.expected_day:
+                # One early print must not enter the calendar the tracker
+                # replays; keep only dates up to the session the universe
+                # actually reached.
+                days = {d for d in days if d <= result.expected_day}
             self.db.upsert_days(days)
             expected = result.expected_day
             at_session = sum(1 for d in final.values()
@@ -592,14 +601,17 @@ class DataSync:
             if mismatch:
                 log.info("%s: overlap mismatch -> full refresh", symbol)
                 replacement = _indexed(self._max_fetch(self._source(symbol)))
-                if len(replacement) < 30 and old_rows >= 30:
-                    # Yahoo served a stub for the refresh. Never replace a real
-                    # history with it; leave the stored file untouched.
+                truncated = (old is not None and not replacement.empty
+                             and (len(replacement) < int(old_rows * 0.5)
+                                  or replacement.index.min() > old.index.min()))
+                if (len(replacement) < 30 and old_rows >= 30) or truncated:
+                    # Yahoo served a stub or a truncated refresh. Never replace
+                    # a real history with it; leave the stored file untouched.
                     result.unchanged += 1
                     self._state(symbol, old.index[-1].date(), bars=old_rows,
                                 status="stale",
-                                error="stub response on refresh; kept stored history")
-                    log.warning("%s: stub refresh (%d rows), stored history kept",
+                                error="truncated refresh; kept stored history")
+                    log.warning("%s: truncated refresh (%d rows), stored history kept",
                                 symbol, len(replacement))
                     return
                 merged = replacement
@@ -658,6 +670,10 @@ class DataSync:
         expected = expected_last_day(lasts.values())
         result.expected_day = expected
         if expected is None:
+            message = ("no session reached by half the universe; coverage left "
+                       "unchanged and no laggards retried")
+            log.warning(message)
+            result.note = message
             return lasts
         laggards = [s for s, d in lasts.items()
                     if business_days_behind(d, expected) > STALE_BDAYS]

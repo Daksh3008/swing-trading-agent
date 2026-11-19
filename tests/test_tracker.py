@@ -310,3 +310,36 @@ def test_reconcile_rolls_back_an_entry_after_the_trusted_session(tmp_path):
     assert trade["status"] == "suggested"
     assert trade["entry_price"] is None
     assert float(db.get_state("cash")) == pytest.approx(60_000.0)
+
+
+def test_reconcile_reopens_an_exit_after_the_trusted_session(tmp_path):
+    db, tracker, _ = _falling_rig(tmp_path, [100, 100, 80, 80])
+    _coverage(db, DAYS[1])
+    tracker.update_day(DAYS[1])              # fills 150 at 100, cash 45,000
+    trade = db.open_trades()[0]
+    # the old build closed it on DAYS[2] and banked the proceeds
+    db.update_trade(trade["id"], status="closed", exit_date=DAYS[2],
+                    exit_price=80.0, exit_cost=0.0, exit_reason="stop_initial",
+                    pnl=-3_000.0)
+    db.set_state("cash", 57_000.0)           # 45,000 + 80 * 150
+
+    result = tracker.reconcile()
+
+    assert result["exits_reopened"] == 1
+    reopened = db.trade(trade["id"])
+    assert reopened["status"] == "open"
+    assert reopened["exit_price"] is None and reopened["pnl"] is None
+    assert float(db.get_state("cash")) == pytest.approx(45_000.0)
+    assert reopened["days_held"] == 0
+
+
+def test_trusted_day_ignores_a_sparse_sync_state(tmp_path):
+    settings = Settings(root=tmp_path, universe=UniverseConfig(),
+                        download=DownloadConfig())
+    settings.ensure_dirs()
+    for i in range(4):
+        (settings.daily_dir / f"S{i}.BO.parquet").write_bytes(b"")
+    db = Database(tmp_path / "data" / "app.db").init()
+    db.set_sync_state("S0.BO", "2024-03-02")     # one of four symbols
+
+    assert db.trusted_day() is None
