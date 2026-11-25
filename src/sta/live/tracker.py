@@ -172,12 +172,13 @@ class Tracker:
                 fillable.append(row)
 
         open_count = len(self.db.open_trades())
-        if cash < params.position_size * 0.98:
-            fillable = []          # engine-level "no cash" gate for the day
+        no_cash = cash < params.position_size * 0.98
         for row in fillable:
             symbol = row["symbol"]
-            if (open_count >= params.max_positions or symbol in exited_today
+            if (no_cash or open_count >= params.max_positions
+                    or symbol in exited_today
                     or self.db.has_open_trade(symbol)):
+                # the suggestion had its one fill day and could not take it
                 self.db.update_trade(row["id"], status="expired")
                 outcome.expired += 1
                 continue

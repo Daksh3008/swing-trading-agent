@@ -117,6 +117,17 @@ def test_rebase_book_resets_cash_and_equity(tmp_path):
     assert db.equity_series()[-1]["nav"] == 75_000.0
 
 
+def test_no_cash_expires_the_queue_instead_of_lingering(rig, tmp_path):
+    """A suggestion whose fill day cannot afford it is expired, not left queued."""
+    db, tracker, _ = rig
+    _queue(db, "AAA.BO", 0.9)
+    db.set_state("cash", 100.0)          # far below one slot
+    tracker.update_day(DAYS[1])
+    assert db.open_trades() == []
+    assert len(db.trades("expired")) == 1
+    assert len(db.suggested_trades()) == 0
+
+
 def test_rebase_refuses_with_open_positions(rig):
     from sta.live.ops import rebase_book
 
